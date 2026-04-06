@@ -1,0 +1,15 @@
+{
+  "name": "deaf-meet",
+  "version": "1.0.0",
+  "description": "Zoom real-time caption overlay",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0"
+  }
+}

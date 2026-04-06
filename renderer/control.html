@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Caption Control</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        --bg: linear-gradient(180deg, #f4efe6 0%, #efe3d0 100%);
+        --card: rgba(255, 251, 246, 0.82);
+        --line: rgba(95, 72, 45, 0.14);
+        --text: #1d140c;
+        --muted: #685647;
+        --accent: #b85c38;
+        --accent-strong: #8f3f21;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .app {
+        padding: 18px;
+        display: grid;
+        gap: 14px;
+      }
+
+      .titlebar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 6px 2px;
+        -webkit-app-region: drag;
+        app-region: drag;
+      }
+
+      .titlebar h1 {
+        margin: 0;
+        font-size: 20px;
+        letter-spacing: 0.02em;
+      }
+
+      .badge {
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(184, 92, 56, 0.12);
+        color: var(--accent-strong);
+        font-size: 12px;
+        font-weight: 600;
+        -webkit-app-region: no-drag;
+        app-region: no-drag;
+      }
+
+      .drag-hint {
+        margin-top: -4px;
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.02em;
+      }
+
+      .card {
+        padding: 16px;
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 22px;
+        box-shadow: 0 14px 32px rgba(82, 50, 18, 0.08);
+        backdrop-filter: blur(16px);
+      }
+
+      .card h2 {
+        margin: 0 0 10px;
+        font-size: 16px;
+      }
+
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+
+      .row.wrap {
+        flex-wrap: wrap;
+      }
+
+      .subtle {
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      input,
+      select,
+      button,
+      textarea {
+        font: inherit;
+        -webkit-app-region: no-drag;
+        app-region: no-drag;
+      }
+
+      input,
+      select,
+      textarea {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.9);
+        color: var(--text);
+      }
+
+      textarea {
+        min-height: 76px;
+        resize: vertical;
+      }
+
+      input[type="range"] {
+        padding: 0;
+      }
+
+      button {
+        border: 0;
+        border-radius: 12px;
+        padding: 10px 14px;
+        background: #1d140c;
+        color: #fff8ef;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: rgba(29, 20, 12, 0.08);
+        color: var(--text);
+      }
+
+      button.active {
+        background: var(--accent);
+      }
+
+      button:disabled {
+        cursor: not-allowed;
+        opacity: 0.55;
+      }
+
+      .url-box,
+      .status-box {
+        padding: 12px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid var(--line);
+        word-break: break-word;
+        font-size: 13px;
+      }
+
+      .status-box strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+
+      #feed {
+        display: grid;
+        gap: 8px;
+        max-height: 260px;
+        overflow: auto;
+      }
+
+      .feed-item,
+      .empty {
+        padding: 10px 12px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.68);
+        border: 1px solid var(--line);
+      }
+
+      .feed-item.emotion-happy {
+        color: #1f7a31;
+      }
+
+      .feed-item.emotion-sad {
+        color: #1f5fa8;
+      }
+
+      .feed-item.emotion-angry {
+        color: #b42318;
+      }
+
+      .feed-item.emotion-calm {
+        color: #347d7a;
+      }
+
+      .feed-item.emotion-excited {
+        color: #8b3fd6;
+      }
+
+      .feed-item time {
+        display: inline-block;
+        min-width: 68px;
+        font-variant-numeric: tabular-nums;
+        color: var(--accent-strong);
+        margin-right: 8px;
+      }
+
+      .emotion-pill {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(29, 20, 12, 0.08);
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <div class="titlebar">
+        <h1>Emotion Speech Overlay</h1>
+        <div id="server-badge" class="badge">Checking server</div>
+      </div>
+      <div class="drag-hint">Drag anywhere in the top bar to move this window.</div>
+
+      <section class="card stack">
+        <h2>Speech Input</h2>
+        <div id="speech-status" class="status-box">
+          <strong>Microphone idle</strong>
+          Click Start Listening and allow microphone access.
+        </div>
+        <div id="interim-preview" class="url-box">No live transcript yet.</div>
+        <div class="row wrap">
+          <button id="start-listening">Start Listening</button>
+          <button id="stop-listening" class="secondary" disabled>Stop Listening</button>
+          <button id="open-browser-capture" class="secondary">Open Browser Capture</button>
+          <button id="clear-conversation" class="secondary">Clear Conversation</button>
+        </div>
+        <div id="speech-support" class="subtle">Checking browser speech recognition support...</div>
+      </section>
+
+      <section class="card stack">
+        <h2>Display Settings</h2>
+        <label class="subtle" for="theme-select">Theme</label>
+        <select id="theme-select">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+          <option value="yellow">Yellow</option>
+          <option value="blue">Blue</option>
+          <option value="outline">Outline</option>
+        </select>
+        <label class="subtle" for="lines-select">Lines</label>
+        <select id="lines-select">
+          <option value="1">1 line</option>
+          <option value="2" selected>2 lines</option>
+          <option value="3">3 lines</option>
+        </select>
+        <label class="subtle" for="font-size">Font size <span id="font-size-value">26px</span></label>
+        <input id="font-size" type="range" min="14" max="40" value="26" />
+        <label class="subtle" for="panel-width">Conversation width <span id="panel-width-value">1120px</span></label>
+        <input id="panel-width" type="range" min="420" max="1400" step="20" value="1120" />
+        <label class="subtle" for="panel-height">Conversation height <span id="panel-height-value">240px</span></label>
+        <input id="panel-height" type="range" min="120" max="520" step="10" value="240" />
+        <div class="row wrap">
+          <button class="secondary position-button" data-position="top">Top</button>
+          <button class="secondary position-button" data-position="middle">Middle</button>
+          <button class="secondary position-button active" data-position="bottom">Bottom</button>
+          <button id="toggle-overlay" class="secondary">Hide Overlay</button>
+          <button id="temporary-edit-mode" class="secondary">Edit Overlay For 15s</button>
+        </div>
+      </section>
+
+      <section class="card stack">
+        <h2>Test</h2>
+        <textarea id="manual-caption" placeholder="Type text to test emotion-coded captions without using the microphone"></textarea>
+        <div class="row wrap">
+          <button id="send-manual-caption">Send Test Caption</button>
+          <button id="simulate-caption" class="secondary">Send Sample Caption</button>
+        </div>
+        <div class="subtle">Optional local endpoint for external caption injection.</div>
+        <div id="local-url" class="url-box">Loading...</div>
+        <div id="browser-capture-url" class="url-box">Loading browser capture URL...</div>
+        <div class="row wrap">
+          <button id="copy-local-url" class="secondary">Copy Local URL</button>
+          <button id="copy-browser-capture-url" class="secondary">Copy Browser Capture URL</button>
+        </div>
+      </section>
+
+      <section class="card stack">
+        <h2>Live Feed</h2>
+        <div id="feed">
+          <div class="empty">Waiting for the first caption...</div>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const settings = {
+        theme: "dark",
+        fontSize: 26,
+        maxLines: 2,
+        position: "bottom",
+        overlayVisible: true,
+        panelWidth: 1120,
+        panelHeight: 240,
+        panelOffsetX: 0,
+        panelOffsetY: 0,
+        editMode: false,
+      };
+
+      const samples = [
+        "Hello everyone, I am really happy to see you all today.",
+        "I am sorry, this part has been difficult for our team.",
+        "Please stop for a moment, this issue is urgent.",
+        "It is okay, we can take this slowly and stay calm.",
+        "This is amazing, we are excited to launch it today.",
+      ];
+
+      const serverBadge = document.getElementById("server-badge");
+      const speechStatus = document.getElementById("speech-status");
+      const speechSupport = document.getElementById("speech-support");
+      const interimPreview = document.getElementById("interim-preview");
+      const themeSelect = document.getElementById("theme-select");
+      const linesSelect = document.getElementById("lines-select");
+      const fontSizeInput = document.getElementById("font-size");
+      const fontSizeValue = document.getElementById("font-size-value");
+      const panelWidthInput = document.getElementById("panel-width");
+      const panelWidthValue = document.getElementById("panel-width-value");
+      const panelHeightInput = document.getElementById("panel-height");
+      const panelHeightValue = document.getElementById("panel-height-value");
+      const feed = document.getElementById("feed");
+      const toggleOverlayButton = document.getElementById("toggle-overlay");
+      const temporaryEditModeButton = document.getElementById("temporary-edit-mode");
+      const manualCaptionInput = document.getElementById("manual-caption");
+      const localUrl = document.getElementById("local-url");
+      const startListeningButton = document.getElementById("start-listening");
+      const stopListeningButton = document.getElementById("stop-listening");
+      const openBrowserCaptureButton = document.getElementById("open-browser-capture");
+      const clearConversationButton = document.getElementById("clear-conversation");
+      const browserCaptureUrl = document.getElementById("browser-capture-url");
+      const positionButtons = Array.from(document.querySelectorAll(".position-button"));
+
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      let recognition = null;
+      let shouldKeepListening = false;
+      let port = 4153;
+
+      function buildLocalCaptionUrl() {
+        return `http://127.0.0.1:${port}/caption`;
+      }
+
+      function buildBrowserCaptureUrl() {
+        return `http://127.0.0.1:${port}/speech-capture`;
+      }
+
+      function formatTime(timestamp) {
+        return new Date(timestamp).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        });
+      }
+
+      function refreshLocalUrl() {
+        localUrl.textContent = buildLocalCaptionUrl();
+        browserCaptureUrl.textContent = buildBrowserCaptureUrl();
+      }
+
+      function updatePositionButtons() {
+        positionButtons.forEach((button) => {
+          button.classList.toggle("active", button.dataset.position === settings.position);
+        });
+      }
+
+      function syncSettings() {
+        themeSelect.value = settings.theme;
+        linesSelect.value = String(settings.maxLines);
+        fontSizeInput.value = String(settings.fontSize);
+        fontSizeValue.textContent = `${settings.fontSize}px`;
+        panelWidthInput.value = String(settings.panelWidth);
+        panelWidthValue.textContent = `${settings.panelWidth}px`;
+        panelHeightInput.value = String(settings.panelHeight);
+        panelHeightValue.textContent = `${settings.panelHeight}px`;
+        toggleOverlayButton.textContent = settings.overlayVisible ? "Hide Overlay" : "Show Overlay";
+        temporaryEditModeButton.textContent = settings.editMode ? "Editing Overlay..." : "Edit Overlay For 15s";
+        temporaryEditModeButton.classList.toggle("active", settings.editMode);
+        updatePositionButtons();
+      }
+
+      function sendSettings() {
+        window.captionBridge.updateSettings({
+          theme: settings.theme,
+          fontSize: settings.fontSize,
+          maxLines: settings.maxLines,
+          position: settings.position,
+          panelWidth: settings.panelWidth,
+          panelHeight: settings.panelHeight,
+          panelOffsetX: settings.panelOffsetX,
+          panelOffsetY: settings.panelOffsetY,
+        });
+      }
+
+      function setSpeechStatus(title, detail) {
+        speechStatus.innerHTML = `<strong>${title}</strong>${detail}`;
+      }
+
+      function prependFeedItem(entry) {
+        const emptyState = feed.querySelector(".empty");
+        if (emptyState) {
+          emptyState.remove();
+        }
+
+        const item = document.createElement("div");
+        item.className = `feed-item emotion-${entry.emotion || "neutral"}`;
+        item.innerHTML = `
+          <div><time>${formatTime(entry.timestamp)}</time><span>${entry.text}</span></div>
+          <div class="emotion-pill">${entry.emotion || "neutral"}</div>
+        `;
+        feed.prepend(item);
+
+        while (feed.children.length > 30) {
+          feed.removeChild(feed.lastElementChild);
+        }
+      }
+
+      function injectCaption(text, source = "speech") {
+        const normalized = String(text || "").trim();
+        if (!normalized) {
+          return;
+        }
+
+        window.captionBridge.injectCaption({
+          text: normalized,
+          lang: "en",
+          source,
+        });
+      }
+
+      function startRecognition() {
+        if (!SpeechRecognition) {
+          setSpeechStatus("Speech recognition unavailable", "This Chromium runtime does not expose the SpeechRecognition API.");
+          return;
+        }
+
+        if (recognition) {
+          recognition.stop();
+        }
+
+        recognition = new SpeechRecognition();
+        recognition.lang = "en-US";
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.maxAlternatives = 1;
+
+        recognition.onstart = () => {
+          setSpeechStatus("Listening", "Speak naturally. Final phrases will be sent to the overlay.");
+          startListeningButton.disabled = true;
+          stopListeningButton.disabled = false;
+        };
+
+        recognition.onresult = (event) => {
+          let interimText = "";
+
+          for (let index = event.resultIndex; index < event.results.length; index += 1) {
+            const result = event.results[index];
+            const transcript = result[0] ? result[0].transcript.trim() : "";
+
+            if (!transcript) {
+              continue;
+            }
+
+            if (result.isFinal) {
+              injectCaption(transcript, "speech");
+              interimPreview.textContent = `Final: ${transcript}`;
+            } else {
+              interimText += `${transcript} `;
+            }
+          }
+
+          if (interimText.trim()) {
+            interimPreview.textContent = `Listening: ${interimText.trim()}`;
+          }
+        };
+
+        recognition.onerror = (event) => {
+          const error = event.error || "Unknown recognition error.";
+          if (error === "network") {
+            setSpeechStatus("Speech recognition error", "Electron speech recognition hit a network error. Use Browser Capture for a more reliable microphone path.");
+          } else {
+            setSpeechStatus("Speech recognition error", error);
+          }
+          if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+            shouldKeepListening = false;
+            startListeningButton.disabled = false;
+            stopListeningButton.disabled = true;
+          }
+        };
+
+        recognition.onend = () => {
+          startListeningButton.disabled = false;
+          stopListeningButton.disabled = true;
+
+          if (shouldKeepListening) {
+            setSpeechStatus("Reconnecting", "Speech recognition paused briefly. Restarting...");
+            recognition.start();
+            return;
+          }
+
+          setSpeechStatus("Microphone idle", "Click Start Listening and allow microphone access.");
+        };
+
+        recognition.start();
+      }
+
+      document.getElementById("copy-local-url").addEventListener("click", async () => {
+        await navigator.clipboard.writeText(localUrl.textContent);
+      });
+
+      document.getElementById("copy-browser-capture-url").addEventListener("click", async () => {
+        await navigator.clipboard.writeText(browserCaptureUrl.textContent);
+      });
+
+      themeSelect.addEventListener("change", () => {
+        settings.theme = themeSelect.value;
+        sendSettings();
+      });
+
+      linesSelect.addEventListener("change", () => {
+        settings.maxLines = Number(linesSelect.value);
+        sendSettings();
+      });
+
+      fontSizeInput.addEventListener("input", () => {
+        settings.fontSize = Number(fontSizeInput.value);
+        fontSizeValue.textContent = `${settings.fontSize}px`;
+        sendSettings();
+      });
+
+      panelWidthInput.addEventListener("input", () => {
+        settings.panelWidth = Number(panelWidthInput.value);
+        panelWidthValue.textContent = `${settings.panelWidth}px`;
+        sendSettings();
+      });
+
+      panelHeightInput.addEventListener("input", () => {
+        settings.panelHeight = Number(panelHeightInput.value);
+        panelHeightValue.textContent = `${settings.panelHeight}px`;
+        sendSettings();
+      });
+
+      positionButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          settings.position = button.dataset.position;
+          updatePositionButtons();
+          window.captionBridge.reposition(settings.position);
+          sendSettings();
+        });
+      });
+
+      toggleOverlayButton.addEventListener("click", () => {
+        settings.overlayVisible = !settings.overlayVisible;
+        syncSettings();
+        window.captionBridge.toggleOverlay();
+      });
+
+      temporaryEditModeButton.addEventListener("click", () => {
+        settings.editMode = true;
+        syncSettings();
+        sendSettings();
+
+        window.clearTimeout(window.__editModeTimeout);
+        window.__editModeTimeout = window.setTimeout(() => {
+          settings.editMode = false;
+          syncSettings();
+          sendSettings();
+        }, 15000);
+      });
+
+      startListeningButton.addEventListener("click", () => {
+        shouldKeepListening = true;
+        startRecognition();
+      });
+
+      stopListeningButton.addEventListener("click", () => {
+        shouldKeepListening = false;
+        if (recognition) {
+          recognition.stop();
+        }
+      });
+
+      openBrowserCaptureButton.addEventListener("click", () => {
+        window.captionBridge.openSpeechCapture();
+      });
+
+      clearConversationButton.addEventListener("click", () => {
+        window.captionBridge.clearCaptions();
+      });
+
+      document.getElementById("send-manual-caption").addEventListener("click", () => {
+        injectCaption(manualCaptionInput.value, "manual");
+        manualCaptionInput.value = "";
+      });
+
+      document.getElementById("simulate-caption").addEventListener("click", () => {
+        const text = samples[Math.floor(Math.random() * samples.length)];
+        injectCaption(text, "simulate");
+      });
+
+      window.captionBridge.onCaption((entry) => {
+        prependFeedItem(entry);
+      });
+
+      window.captionBridge.onClearCaptions(() => {
+        feed.innerHTML = '<div class="empty">Conversation cleared. Waiting for the next caption...</div>';
+      });
+
+      window.captionBridge.onSettingsUpdate((nextSettings) => {
+        Object.assign(settings, nextSettings);
+        syncSettings();
+      });
+
+      window.captionBridge.getPort().then((resolvedPort) => {
+        port = resolvedPort;
+        refreshLocalUrl();
+      });
+
+      window.captionBridge.getStatus().then((status) => {
+        serverBadge.textContent = status.running ? `Server live on ${status.port}` : "Server offline";
+      });
+
+      if (SpeechRecognition) {
+        speechSupport.textContent = "Speech recognition is available in this runtime, but Electron can still be unreliable. Browser Capture is the safer fallback.";
+      } else {
+        speechSupport.textContent = "Speech recognition is not available in this Electron runtime. Use Browser Capture or manual test captions.";
+      }
+
+      syncSettings();
+      refreshLocalUrl();
+    </script>
+  </body>
+</html>

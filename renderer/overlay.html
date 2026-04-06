@@ -1,0 +1,449 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Caption Overlay</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        background: transparent !important;
+        overflow: hidden;
+      }
+
+      body {
+        display: flex;
+      }
+
+      #stage {
+        width: 100%;
+        height: 100%;
+        padding: 14px 28px;
+        display: flex;
+        align-items: flex-end;
+        justify-content: center;
+        box-sizing: border-box;
+      }
+
+      #stage.position-top {
+        align-items: flex-start;
+      }
+
+      #stage.position-middle {
+        align-items: center;
+      }
+
+      .conversation-panel {
+        width: min(100%, 1120px);
+        max-height: 100%;
+        border-radius: 28px;
+        padding: 14px;
+        overflow: hidden;
+        position: relative;
+        transform: translate(0, 0);
+      }
+
+      .conversation-panel.editable {
+        outline: 2px dashed rgba(255, 255, 255, 0.5);
+      }
+
+      .edit-toolbar {
+        display: none;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 8px 12px 12px;
+        color: #ffffff;
+        font-size: 12px;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+
+      .conversation-panel.editable .edit-toolbar {
+        display: flex;
+      }
+
+      .edit-label {
+        opacity: 0.92;
+      }
+
+      .resize-handle {
+        position: absolute;
+        right: 10px;
+        bottom: 10px;
+        width: 18px;
+        height: 18px;
+        border-right: 3px solid rgba(255, 255, 255, 0.75);
+        border-bottom: 3px solid rgba(255, 255, 255, 0.75);
+        cursor: nwse-resize;
+        display: none;
+      }
+
+      .conversation-panel.editable .resize-handle {
+        display: block;
+      }
+
+      .theme-dark .conversation-panel {
+        background: rgba(10, 10, 10, 0.3);
+        backdrop-filter: blur(10px);
+      }
+
+      .theme-light .conversation-panel {
+        background: rgba(255, 255, 255, 0.28);
+        backdrop-filter: blur(10px);
+      }
+
+      .theme-yellow .conversation-panel {
+        background: rgba(255, 220, 0, 0.16);
+      }
+
+      .theme-blue .conversation-panel {
+        background: rgba(14, 90, 210, 0.2);
+        backdrop-filter: blur(8px);
+      }
+
+      .theme-outline .conversation-panel {
+        background: rgba(0, 0, 0, 0.18);
+      }
+
+      #caption-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        align-items: stretch;
+        width: 100%;
+        max-height: 240px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        padding-right: 6px;
+      }
+
+      #caption-stack::-webkit-scrollbar {
+        width: 8px;
+      }
+
+      #caption-stack::-webkit-scrollbar-thumb {
+        background: rgba(255, 255, 255, 0.22);
+        border-radius: 999px;
+      }
+
+      .caption-pill {
+        display: flex;
+        align-items: center;
+        justify-content: flex-start;
+        max-width: 100%;
+        padding: 14px 22px;
+        border-radius: 26px;
+        text-align: left;
+        line-height: 1.35;
+        letter-spacing: 0.01em;
+        animation: slideIn 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+        word-break: break-word;
+        border: 2px solid transparent;
+      }
+
+      .theme-dark .caption-pill {
+        background: rgba(0, 0, 0, 0.82);
+        color: #ffffff;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 20px 40px rgba(0, 0, 0, 0.22);
+      }
+
+      .theme-light .caption-pill {
+        background: rgba(255, 255, 255, 0.92);
+        color: #111111;
+        backdrop-filter: blur(12px);
+        box-shadow: 0 18px 36px rgba(25, 20, 15, 0.14);
+      }
+
+      .theme-yellow .caption-pill {
+        background: rgba(255, 220, 0, 0.95);
+        color: #17120a;
+        box-shadow: 0 18px 36px rgba(120, 88, 0, 0.2);
+      }
+
+      .theme-blue .caption-pill {
+        background: rgba(14, 90, 210, 0.88);
+        color: #ffffff;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 20px 40px rgba(14, 90, 210, 0.24);
+      }
+
+      .theme-outline .caption-pill {
+        background: transparent;
+        color: #ffffff;
+        text-shadow:
+          0 1px 0 rgba(0, 0, 0, 0.95),
+          1px 0 0 rgba(0, 0, 0, 0.95),
+          0 -1px 0 rgba(0, 0, 0, 0.95),
+          -1px 0 0 rgba(0, 0, 0, 0.95),
+          1px 1px 0 rgba(0, 0, 0, 0.95),
+          -1px 1px 0 rgba(0, 0, 0, 0.95),
+          1px -1px 0 rgba(0, 0, 0, 0.95),
+          -1px -1px 0 rgba(0, 0, 0, 0.95);
+      }
+
+      .caption-pill.emotion-happy {
+        color: #1f7a31;
+        border-color: rgba(84, 199, 111, 0.42);
+      }
+
+      .caption-pill.emotion-sad {
+        color: #1f5fa8;
+        border-color: rgba(72, 136, 231, 0.38);
+      }
+
+      .caption-pill.emotion-angry {
+        color: #b42318;
+        border-color: rgba(230, 77, 46, 0.42);
+      }
+
+      .caption-pill.emotion-calm {
+        color: #347d7a;
+        border-color: rgba(52, 125, 122, 0.3);
+      }
+
+      .caption-pill.emotion-excited {
+        color: #8b3fd6;
+        border-color: rgba(139, 63, 214, 0.36);
+      }
+
+      .caption-pill.emotion-neutral {
+        color: inherit;
+        border-color: rgba(255, 255, 255, 0.16);
+      }
+
+      .theme-outline .caption-pill.emotion-happy {
+        color: #98f5a9;
+      }
+
+      .theme-outline .caption-pill.emotion-sad {
+        color: #8ec7ff;
+      }
+
+      .theme-outline .caption-pill.emotion-angry {
+        color: #ff9b7d;
+      }
+
+      .theme-outline .caption-pill.emotion-calm {
+        color: #93f2ef;
+      }
+
+      .theme-outline .caption-pill.emotion-excited {
+        color: #d8b5ff;
+      }
+
+      @keyframes slideIn {
+        from {
+          opacity: 0;
+          transform: translateY(12px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage" class="theme-dark position-bottom">
+      <div class="conversation-panel">
+        <div class="edit-toolbar">
+          <div class="edit-label">Edit Mode: drag panel and use corner to resize</div>
+        </div>
+        <div id="caption-stack"></div>
+        <div class="resize-handle" aria-hidden="true"></div>
+      </div>
+    </div>
+    <script>
+      const DEMO_TIMEOUT = 3500;
+      const stage = document.getElementById("stage");
+      const stack = document.getElementById("caption-stack");
+      const panel = document.querySelector(".conversation-panel");
+      const resizeHandle = document.querySelector(".resize-handle");
+
+      const settings = {
+        theme: "dark",
+        fontSize: 26,
+        maxLines: 2,
+        position: "bottom",
+        panelWidth: 1120,
+        panelHeight: 240,
+        panelOffsetX: 0,
+        panelOffsetY: 0,
+        editMode: false,
+      };
+      let dragState = null;
+
+      const demoCaptions = [
+        "Hello everyone, thanks for joining today.",
+        "We can review the design after this section.",
+        "The overlay should stay on top of Zoom during fullscreen.",
+        "Please paste the API token for this meeting into the control panel.",
+        "This preview mode cycles sample captions every few seconds.",
+      ];
+      const emotionSequence = ["happy", "sad", "angry", "calm", "excited"];
+      let emotionIndex = 0;
+
+      function inferEmotion(text) {
+        const normalized = text.toLowerCase();
+
+        if (/(great|happy|glad|love|thanks|wonderful|nice)/.test(normalized)) {
+          return "happy";
+        }
+
+        if (/(sorry|sad|difficult|hard|unfortunately|upset|miss)/.test(normalized)) {
+          return "sad";
+        }
+
+        if (/(stop|angry|mad|urgent|problem|wrong|frustrat)/.test(normalized)) {
+          return "angry";
+        }
+
+        if (/(calm|steady|okay|breathe|slow|gentle|relax)/.test(normalized)) {
+          return "calm";
+        }
+
+        if (/(amazing|wow|excited|awesome|yes!|let's go|incredible)/.test(normalized)) {
+          return "excited";
+        }
+
+        const nextEmotion = emotionSequence[emotionIndex % emotionSequence.length];
+        emotionIndex += 1;
+        return nextEmotion;
+      }
+
+      function applySettings(nextSettings = {}) {
+        Object.assign(settings, nextSettings);
+        stage.className = `theme-${settings.theme} position-${settings.position}`;
+        stack.style.fontSize = `${settings.fontSize}px`;
+        panel.style.width = `min(100%, ${settings.panelWidth}px)`;
+        stack.style.maxHeight = `${settings.panelHeight}px`;
+        panel.style.transform = `translate(${settings.panelOffsetX}px, ${settings.panelOffsetY}px)`;
+        panel.classList.toggle("editable", Boolean(settings.editMode));
+        trimCaptions();
+      }
+
+      function trimCaptions() {
+        const stickyLimit = Math.max(settings.maxLines * 10, 18);
+        while (stack.children.length > stickyLimit) {
+          stack.removeChild(stack.firstElementChild);
+        }
+      }
+
+      function renderCaption(entry) {
+        const pill = document.createElement("div");
+        const emotion = entry.emotion || inferEmotion(entry.text);
+        pill.className = `caption-pill emotion-${emotion}`;
+        pill.textContent = entry.text;
+        pill.dataset.emotion = emotion;
+        stack.appendChild(pill);
+        trimCaptions();
+        stack.scrollTop = stack.scrollHeight;
+      }
+
+      function startDemoMode() {
+        let index = 0;
+        renderCaption({ text: demoCaptions[index] });
+        window.setInterval(() => {
+          index = (index + 1) % demoCaptions.length;
+          renderCaption({ text: demoCaptions[index] });
+        }, DEMO_TIMEOUT);
+      }
+
+      function beginDrag(mode, event) {
+        if (!settings.editMode) {
+          return;
+        }
+
+        dragState = {
+          mode,
+          startX: event.clientX,
+          startY: event.clientY,
+          width: settings.panelWidth,
+          height: settings.panelHeight,
+          offsetX: settings.panelOffsetX,
+          offsetY: settings.panelOffsetY,
+        };
+        event.preventDefault();
+      }
+
+      function onPointerMove(event) {
+        if (!dragState) {
+          return;
+        }
+
+        const dx = event.clientX - dragState.startX;
+        const dy = event.clientY - dragState.startY;
+
+        if (dragState.mode === "move") {
+          settings.panelOffsetX = dragState.offsetX + dx;
+          settings.panelOffsetY = dragState.offsetY + dy;
+        } else if (dragState.mode === "resize") {
+          settings.panelWidth = dragState.width + dx;
+          settings.panelHeight = dragState.height + dy;
+        }
+
+        applySettings(settings);
+      }
+
+      function finishPointer() {
+        if (!dragState) {
+          return;
+        }
+
+        dragState = null;
+        if (window.captionBridge) {
+          window.captionBridge.updateSettings({
+            panelWidth: settings.panelWidth,
+            panelHeight: settings.panelHeight,
+            panelOffsetX: settings.panelOffsetX,
+            panelOffsetY: settings.panelOffsetY,
+          });
+        }
+      }
+
+      if (window.captionBridge) {
+        window.captionBridge.onCaption((entry) => {
+          if (entry && entry.text) {
+            renderCaption(entry);
+          }
+        });
+        window.captionBridge.onClearCaptions(() => {
+          stack.innerHTML = "";
+        });
+
+        window.captionBridge.onSettingsUpdate((nextSettings) => {
+          applySettings(nextSettings);
+        });
+
+        panel.addEventListener("pointerdown", (event) => {
+          if (event.target === resizeHandle) {
+            beginDrag("resize", event);
+            return;
+          }
+
+          if (settings.editMode && event.target.closest(".edit-toolbar")) {
+            beginDrag("move", event);
+          }
+        });
+
+        window.addEventListener("pointermove", onPointerMove);
+        window.addEventListener("pointerup", finishPointer);
+        window.addEventListener("pointercancel", finishPointer);
+      } else {
+        startDemoMode();
+      }
+
+      applySettings(settings);
+    </script>
+  </body>
+</html>
