@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Deaf Meet Realtime Room</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: radial-gradient(circle at top, #22465b 0%, #10232f 38%, #081118 100%);
+        --panel: rgba(8, 17, 24, 0.78);
+        --panel-strong: rgba(11, 24, 33, 0.92);
+        --line: rgba(189, 222, 238, 0.16);
+        --text: #ecf7ff;
+        --muted: #9db5c3;
+        --accent: #7ee0c7;
+        --accent-strong: #2db59a;
+        --warning: #f6c16a;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .shell {
+        width: min(1080px, calc(100vw - 24px));
+        margin: 0 auto;
+        padding: 24px 0 56px;
+        display: grid;
+        gap: 18px;
+      }
+
+      .hero,
+      .panel {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        backdrop-filter: blur(20px);
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.24);
+      }
+
+      .hero {
+        padding: 24px;
+      }
+
+      .hero h1 {
+        margin: 0 0 10px;
+        font-size: clamp(28px, 5vw, 46px);
+        line-height: 0.95;
+      }
+
+      .hero p,
+      .subtle {
+        margin: 0;
+        color: var(--muted);
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+        grid-template-columns: 340px minmax(0, 1fr);
+      }
+
+      .panel {
+        padding: 18px;
+      }
+
+      .panel h2 {
+        margin: 0 0 12px;
+        font-size: 16px;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+      }
+
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+
+      input,
+      textarea,
+      button {
+        font: inherit;
+      }
+
+      input,
+      textarea {
+        width: 100%;
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.06);
+        color: var(--text);
+      }
+
+      textarea {
+        min-height: 110px;
+        resize: vertical;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 11px 16px;
+        background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+        color: #07221e;
+        font-weight: 700;
+        cursor: pointer;
+      }
+
+      button.secondary {
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--text);
+      }
+
+      button:disabled {
+        opacity: 0.55;
+        cursor: not-allowed;
+      }
+
+      .status,
+      .room-chip,
+      .message,
+      .presence-item {
+        border: 1px solid var(--line);
+        background: var(--panel-strong);
+      }
+
+      .status,
+      .room-chip,
+      .presence-item {
+        border-radius: 18px;
+        padding: 12px 14px;
+      }
+
+      .room-chip strong,
+      .status strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+
+      .messages {
+        display: grid;
+        gap: 10px;
+        max-height: 420px;
+        overflow: auto;
+      }
+
+      .message {
+        border-radius: 22px;
+        padding: 14px 16px;
+      }
+
+      .message.mine {
+        border-color: rgba(126, 224, 199, 0.35);
+      }
+
+      .message-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+
+      .presence-list {
+        display: grid;
+        gap: 8px;
+      }
+
+      .presence-item {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        font-size: 14px;
+      }
+
+      .empty {
+        padding: 22px;
+        border-radius: 20px;
+        border: 1px dashed var(--line);
+        color: var(--muted);
+        text-align: center;
+      }
+
+      .warning {
+        color: var(--warning);
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      @media (max-width: 860px) {
+        .shell {
+          width: min(100vw - 18px, 100%);
+          padding-top: 14px;
+        }
+
+        .grid {
+          grid-template-columns: 1fr;
+        }
+
+        .hero,
+        .panel {
+          border-radius: 22px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <h1>Realtime Conversation Room</h1>
+        <p>Open this room on your Mac and iPhone, join with names, and watch messages sync through Firebase in real time.</p>
+      </section>
+
+      <section id="config-warning" class="panel stack">
+        <h2>Firebase Setup Needed</h2>
+        <div class="status">
+          <strong>Missing local config</strong>
+          Copy <code>web/firebase-config.example.js</code> to <code>web/firebase-config.js</code> and fill in your Firebase project keys before deploying.
+        </div>
+      </section>
+
+      <section id="app-shell" class="grid hidden">
+        <aside class="panel stack">
+          <div class="stack">
+            <h2>Join Room</h2>
+            <input id="display-name" type="text" maxlength="40" placeholder="Your name" />
+            <div class="row">
+              <input id="room-id" type="text" maxlength="40" placeholder="Room code" />
+              <button id="new-room" class="secondary" type="button">New</button>
+            </div>
+            <div class="row">
+              <button id="join-room" type="button">Join</button>
+              <button id="copy-link" class="secondary" type="button">Copy Link</button>
+            </div>
+            <div id="session-status" class="status">
+              <strong>Waiting to join</strong>
+              Enter your name and room code to start the realtime test.
+            </div>
+          </div>
+
+          <div class="stack">
+            <h2>Room Info</h2>
+            <div id="room-chip" class="room-chip">
+              <strong>No room yet</strong>
+              Create or join a room to share the same session across devices.
+            </div>
+            <div class="subtle">Anonymous Firebase Auth is used for this prototype. Enable it in your Firebase console.</div>
+          </div>
+
+          <div class="stack">
+            <h2>Presence</h2>
+            <div id="presence-list" class="presence-list">
+              <div class="empty">No connected participants yet.</div>
+            </div>
+          </div>
+        </aside>
+
+        <section class="panel stack">
+          <div class="row" style="justify-content: space-between">
+            <h2>Conversation</h2>
+            <div id="sync-state" class="subtle">Realtime sync idle</div>
+          </div>
+
+          <div id="messages" class="messages">
+            <div class="empty">Messages will appear here after both devices join the same room.</div>
+          </div>
+
+          <div class="stack">
+            <textarea id="message-input" placeholder="Type a message and send it from Mac or iPhone to confirm both sides update instantly."></textarea>
+            <div class="row">
+              <button id="send-message" type="button">Send Message</button>
+              <button id="clear-draft" class="secondary" type="button">Clear</button>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

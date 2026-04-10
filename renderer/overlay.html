@@ -138,7 +138,8 @@
       .caption-pill {
         display: flex;
         align-items: center;
-        justify-content: flex-start;
+        justify-content: space-between;
+        gap: 14px;
         max-width: 100%;
         padding: 14px 22px;
         border-radius: 26px;
@@ -219,6 +220,23 @@
       .caption-pill.emotion-neutral {
         color: inherit;
         border-color: rgba(255, 255, 255, 0.16);
+      }
+
+      .caption-text {
+        flex: 1;
+        min-width: 0;
+      }
+
+      .emotion-chip {
+        flex-shrink: 0;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.14);
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        white-space: nowrap;
       }
 
       .theme-outline .caption-pill.emotion-happy {
@@ -342,8 +360,14 @@
       function renderCaption(entry) {
         const pill = document.createElement("div");
         const emotion = entry.emotion || inferEmotion(entry.text);
+        const detectedLabel = entry.detectedEmotion || emotion;
         pill.className = `caption-pill emotion-${emotion}`;
-        pill.textContent = entry.text;
+        pill.innerHTML = `
+          <span class="caption-text"></span>
+          <span class="emotion-chip"></span>
+        `;
+        pill.querySelector(".caption-text").textContent = entry.text;
+        pill.querySelector(".emotion-chip").textContent = detectedLabel;
         pill.dataset.emotion = emotion;
         stack.appendChild(pill);
         trimCaptions();

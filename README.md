@@ -149,6 +149,49 @@ Returns the local server state.
 
 Returns recent stored captions.
 
+## Netlify + Firebase Realtime Test
+
+A separate static prototype lives in `web/`. It is designed for a quick two-device test:
+
+1. Open the site on this Mac
+2. Open the same room link on an iPhone
+3. Join both devices with names
+4. Send messages and confirm they appear on both sides in real time
+
+### Firebase setup
+
+1. Create a Firebase project
+2. Enable `Authentication` -> `Anonymous`
+3. Create a `Firestore Database`
+4. Fill in `web/firebase-config.js` with your Firebase web app config
+
+Starter Firestore rules for the prototype:
+
+```text
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /rooms/{roomId} {
+      allow read, write: if request.auth != null;
+      match /{document=**} {
+        allow read, write: if request.auth != null;
+      }
+    }
+  }
+}
+```
+
+### Netlify deploy
+
+This repo now includes `netlify.toml`, which publishes the `web` folder directly.
+
+1. Push the repo to GitHub
+2. Import the repo into Netlify
+3. Let Netlify detect `netlify.toml`
+4. Deploy
+
+After deploy, create a room on the Mac, copy the invite link, and open it on the iPhone.
+
 ## Notes
 
 - The overlay window is transparent and click-through

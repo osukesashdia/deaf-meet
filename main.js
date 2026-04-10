@@ -8,6 +8,9 @@ const {
 const DEFAULT_PORT = Number(process.env.CAPTION_PORT) || 4153;
 const OVERLAY_HEIGHT = 160;
 const CONTROL_SIZE = { width: 420, height: 620 };
+const EMOTION_MODEL_URL =
+  "https://api-inference.huggingface.co/models/j-hartmann/emotion-english-distilroberta-base";
+const EMOTION_REQUEST_TIMEOUT_MS = 10000;
 
 let overlayWindow = null;
 let controlWindow = null;
@@ -31,47 +34,170 @@ const overlaySettings = {
 };
 
 let nextInjectedSeq = 1;
+const emotionResultCache = new Map();
+let captionDispatchChain = Promise.resolve();
 
-function inferEmotion(text) {
+function inferEmotionLabel(text) {
   const normalized = String(text || "").toLowerCase();
 
   if (/(great|happy|glad|love|thanks|wonderful|nice|good news|smile)/.test(normalized)) {
-    return "happy";
+    return "joy";
   }
 
   if (/(sorry|sad|difficult|hard|unfortunately|upset|miss|hurt|tired|loss)/.test(normalized)) {
-    return "sad";
+    return "sadness";
   }
 
   if (/(stop|angry|mad|urgent|problem|wrong|frustrat|serious|now)/.test(normalized)) {
-    return "angry";
+    return "anger";
   }
 
   if (/(calm|steady|okay|breathe|slow|gentle|relax|safe|fine)/.test(normalized)) {
-    return "calm";
+    return "neutral";
   }
 
   if (/(amazing|wow|excited|awesome|yes!|let's go|incredible|fantastic)/.test(normalized)) {
-    return "excited";
+    return "surprise";
   }
 
   return "neutral";
 }
 
-function normalizeCaption(payload = {}) {
+function mapModelEmotionToOverlayEmotion(label) {
+  switch (label) {
+    case "joy":
+      return "happy";
+    case "sadness":
+      return "sad";
+    case "anger":
+    case "disgust":
+      return "angry";
+    case "fear":
+      return "sad";
+    case "surprise":
+      return "excited";
+    case "neutral":
+    default:
+      return "neutral";
+  }
+}
+
+function normalizeInferenceResponse(payload) {
+  if (Array.isArray(payload) && Array.isArray(payload[0])) {
+    return payload[0];
+  }
+
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  return [];
+}
+
+async function detectEmotion(text) {
+  const normalizedText = String(text || "").trim();
+  if (!normalizedText) {
+    return {
+      label: "neutral",
+      emotion: "neutral",
+      source: "fallback",
+      score: null,
+    };
+  }
+
+  const cacheKey = normalizedText.toLowerCase();
+  if (emotionResultCache.has(cacheKey)) {
+    return emotionResultCache.get(cacheKey);
+  }
+
+  const fallbackLabel = inferEmotionLabel(normalizedText);
+  const fallbackResult = {
+    label: fallbackLabel,
+    emotion: mapModelEmotionToOverlayEmotion(fallbackLabel),
+    source: "fallback",
+    score: null,
+  };
+
+  if (typeof fetch !== "function") {
+    emotionResultCache.set(cacheKey, fallbackResult);
+    return fallbackResult;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), EMOTION_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(EMOTION_MODEL_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        inputs: normalizedText,
+        options: {
+          wait_for_model: true,
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`Emotion model request failed with ${response.status}`);
+    }
+
+    const data = await response.json();
+    const scores = normalizeInferenceResponse(data)
+      .filter((entry) => entry && typeof entry.label === "string" && Number.isFinite(entry.score))
+      .sort((left, right) => right.score - left.score);
+
+    const topMatch = scores[0];
+    if (!topMatch) {
+      emotionResultCache.set(cacheKey, fallbackResult);
+      return fallbackResult;
+    }
+
+    const result = {
+      label: topMatch.label,
+      emotion: mapModelEmotionToOverlayEmotion(topMatch.label),
+      source: "model",
+      score: topMatch.score,
+    };
+    emotionResultCache.set(cacheKey, result);
+    return result;
+  } catch (error) {
+    emotionResultCache.set(cacheKey, fallbackResult);
+    return fallbackResult;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+async function normalizeCaption(payload = {}) {
   const text = String(payload.text || "").trim();
   if (!text) {
     return null;
   }
 
-  const seq = Number(payload.seq);
+  const numericSeq = Number(payload.seq);
+  const seq = Number.isFinite(numericSeq) ? numericSeq : nextInjectedSeq++;
+  const detected = payload.detectedEmotion
+    ? {
+        label: String(payload.detectedEmotion).trim().toLowerCase(),
+        emotion: payload.emotion || mapModelEmotionToOverlayEmotion(String(payload.detectedEmotion).trim().toLowerCase()),
+        source: payload.emotionSource || "provided",
+        score: Number.isFinite(Number(payload.emotionScore)) ? Number(payload.emotionScore) : null,
+      }
+    : await detectEmotion(text);
 
   return {
-    seq: Number.isFinite(seq) ? seq : nextInjectedSeq++,
+    seq,
     lang: typeof payload.lang === "string" && payload.lang.trim() ? payload.lang.trim() : "en",
     text,
     timestamp: Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now(),
-    emotion: payload.emotion || inferEmotion(text),
+    emotion: payload.emotion || detected.emotion,
+    detectedEmotion: detected.label,
+    emotionScore: detected.score,
+    emotionSource: detected.source,
     source: payload.source || "http",
     ...(payload.simulated ? { simulated: true } : {}),
   };
@@ -142,18 +268,24 @@ function applyOverlayPosition(position) {
   sendSettingsUpdate();
 }
 
-function broadcastCaption(data) {
-  const caption = normalizeCaption(data);
-  if (!caption) {
-    return;
-  }
+async function broadcastCaption(data) {
+  captionDispatchChain = captionDispatchChain
+    .then(async () => {
+      const caption = await normalizeCaption(data);
+      if (!caption) {
+        return;
+      }
 
-  if (overlayWindow && !overlayWindow.isDestroyed()) {
-    overlayWindow.webContents.send("caption:new", caption);
-  }
-  if (controlWindow && !controlWindow.isDestroyed()) {
-    controlWindow.webContents.send("caption:new", caption);
-  }
+      if (overlayWindow && !overlayWindow.isDestroyed()) {
+        overlayWindow.webContents.send("caption:new", caption);
+      }
+      if (controlWindow && !controlWindow.isDestroyed()) {
+        controlWindow.webContents.send("caption:new", caption);
+      }
+    })
+    .catch(() => {});
+
+  return captionDispatchChain;
 }
 
 function createOverlayWindow() {

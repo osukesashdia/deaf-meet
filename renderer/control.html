@@ -213,7 +213,7 @@
 
       .emotion-pill {
         display: inline-block;
-        margin-top: 8px;
+        margin-left: 8px;
         padding: 4px 8px;
         border-radius: 999px;
         background: rgba(29, 20, 12, 0.08);
@@ -221,6 +221,15 @@
         font-size: 11px;
         letter-spacing: 0.04em;
         text-transform: uppercase;
+      }
+
+      .emotion-meta {
+        margin-top: 8px;
+      }
+
+      .emotion-score {
+        color: var(--muted);
+        font-size: 12px;
       }
     </style>
   </head>
@@ -371,6 +380,27 @@
         });
       }
 
+      function escapeHtml(value) {
+        return String(value || "")
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;")
+          .replace(/'/g, "&#39;");
+      }
+
+      function formatEmotionLabel(entry) {
+        return entry.detectedEmotion || entry.emotion || "neutral";
+      }
+
+      function formatEmotionScore(entry) {
+        if (!Number.isFinite(Number(entry.emotionScore))) {
+          return "";
+        }
+
+        return `${Math.round(Number(entry.emotionScore) * 100)}%`;
+      }
+
       function refreshLocalUrl() {
         localUrl.textContent = buildLocalCaptionUrl();
         browserCaptureUrl.textContent = buildBrowserCaptureUrl();
@@ -423,8 +453,14 @@
         const item = document.createElement("div");
         item.className = `feed-item emotion-${entry.emotion || "neutral"}`;
         item.innerHTML = `
-          <div><time>${formatTime(entry.timestamp)}</time><span>${entry.text}</span></div>
-          <div class="emotion-pill">${entry.emotion || "neutral"}</div>
+          <div>
+            <time>${formatTime(entry.timestamp)}</time>
+            <span>${escapeHtml(entry.text)}</span>
+            <span class="emotion-pill">${escapeHtml(formatEmotionLabel(entry))}</span>
+          </div>
+          <div class="emotion-meta">
+            <span class="emotion-score">${escapeHtml(entry.emotionSource || "model")}${formatEmotionScore(entry) ? ` · ${formatEmotionScore(entry)}` : ""}</span>
+          </div>
         `;
         feed.prepend(item);
 
