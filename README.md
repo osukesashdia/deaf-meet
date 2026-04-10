@@ -31,6 +31,31 @@ deaf-meet/
 - A desktop environment that can run Electron
 - Microphone permission for live speech recognition
 
+## Software And Services
+
+### Desktop app
+
+- Electron
+  - desktop shell for the control window, transparent overlay, and IPC bridge
+- Browser SpeechRecognition API
+  - microphone speech-to-text inside the control window when supported by the Electron runtime
+- Local HTTP caption server
+  - `caption-server.js` exposes `127.0.0.1` endpoints for `/caption`, `/simulate`, `/status`, and `/history`
+- Hugging Face Inference API
+  - `main.js` sends caption text to `j-hartmann/emotion-english-distilroberta-base` to detect emotions such as `anger`, `joy`, `sadness`, `surprise`, and `neutral`
+  - model page: https://huggingface.co/j-hartmann/emotion-english-distilroberta-base
+- Heuristic fallback classifier
+  - used when the hosted emotion request is unavailable or times out so the overlay still shows an emotion label
+
+### Web prototype
+
+- Firebase Authentication
+  - anonymous sign-in for quick room joins
+- Cloud Firestore
+  - realtime room, message, and presence sync for the `web/` prototype
+- Netlify
+  - optional static hosting for the `web/` folder
+
 ## Install
 
 ```bash
@@ -79,7 +104,9 @@ The control window also shows:
 - live feed of recent captions
 - detected emotion label
 
-## Emotion Colors
+## Emotion Detection And Colors
+
+Detected model labels are shown after each sentence in the control feed and overlay. The app then maps those labels into the visual overlay palette:
 
 - `happy` -> green
 - `sad` -> blue
@@ -88,7 +115,7 @@ The control window also shows:
 - `excited` -> purple
 - `neutral` -> theme default
 
-The current emotion detection is heuristic and text-based. It is meant as a first prototype and can later be replaced with a stronger audio/language emotion model.
+The current implementation uses Hugging Face hosted inference for text emotion detection and keeps a local heuristic fallback for offline or failed requests.
 
 ## Local Testing
 
@@ -210,7 +237,7 @@ CAPTION_PORT=5001 npm start
 ## Current Scope
 
 - Primary display only
-- Emotion inference is heuristic for now
+- Emotion inference is text-based and depends on Hugging Face hosted inference when available
 - Browser speech recognition availability depends on the Electron runtime
 - No persistent settings storage yet
 - No packaging or installer workflow yet
