@@ -1,4 +1,5 @@
 const path = require("path");
+const { execFile } = require("child_process");
 const { app, BrowserWindow, ipcMain, screen, shell } = require("electron");
 const {
   startCaptionServer,
@@ -36,6 +37,42 @@ const overlaySettings = {
 let nextInjectedSeq = 1;
 const emotionResultCache = new Map();
 let captionDispatchChain = Promise.resolve();
+
+function openInGoogleChrome(url) {
+  const fallback = () => shell.openExternal(url);
+
+  try {
+    if (process.platform === "darwin") {
+      execFile("open", ["-a", "Google Chrome", url], (error) => {
+        if (error) {
+          fallback();
+        }
+      });
+      return;
+    }
+
+    if (process.platform === "win32") {
+      execFile("cmd", ["/c", "start", "", "chrome", url], (error) => {
+        if (error) {
+          fallback();
+        }
+      });
+      return;
+    }
+
+    execFile("google-chrome", [url], (error) => {
+      if (error) {
+        execFile("chromium-browser", [url], (nestedError) => {
+          if (nestedError) {
+            fallback();
+          }
+        });
+      }
+    });
+  } catch (_error) {
+    fallback();
+  }
+}
 
 function inferEmotionLabel(text) {
   const normalized = String(text || "").toLowerCase();
@@ -431,7 +468,7 @@ function registerIpc() {
   });
 
   ipcMain.on("speech:openCapture", () => {
-    shell.openExternal(`http://127.0.0.1:${captionServerState.port}/speech-capture`);
+    openInGoogleChrome(`http://127.0.0.1:${captionServerState.port}/speech-capture`);
   });
 
   ipcMain.handle("server:getPort", () => captionServerState.port);
