@@ -121,9 +121,17 @@
       const startButton = document.getElementById("start");
       const stopButton = document.getElementById("stop");
       const endpoint = `${window.location.origin}/caption`;
+      const rhythmEndpoint = `${window.location.origin}/rhythm`;
 
       let recognition = null;
       let shouldKeepListening = false;
+      let audioContext = null;
+      let analyserNode = null;
+      let mediaStream = null;
+      let meterFrame = 0;
+      let meterBuffer = [];
+      let lastMeterAt = 0;
+      let lastRhythmPublishAt = 0;
 
       document.getElementById("endpoint").innerHTML = `Posting captions to <code>${endpoint}</code>`;
 
@@ -131,14 +139,140 @@
         statusNode.textContent = text;
       }
 
-      async function postCaption(text) {
-        const body = new URLSearchParams({ text });
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      async function startAudioMeter() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          return;
+        }
+
+        if (mediaStream) {
+          return;
+        }
+
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          const source = audioContext.createMediaStreamSource(mediaStream);
+          analyserNode = audioContext.createAnalyser();
+          analyserNode.fftSize = 512;
+          analyserNode.smoothingTimeConstant = 0.78;
+          source.connect(analyserNode);
+          meterBuffer = [];
+          lastMeterAt = 0;
+          lastRhythmPublishAt = 0;
+          sampleAudioMeter();
+        } catch (_error) {
+          mediaStream = null;
+        }
+      }
+
+      function stopAudioMeter() {
+        if (meterFrame) {
+          window.cancelAnimationFrame(meterFrame);
+          meterFrame = 0;
+        }
+
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          mediaStream = null;
+        }
+
+        if (audioContext) {
+          audioContext.close();
+          audioContext = null;
+        }
+
+        analyserNode = null;
+        meterBuffer = [];
+        lastRhythmPublishAt = 0;
+        publishLiveRhythm(false);
+      }
+
+      function sampleAudioMeter(now = 0) {
+        if (!analyserNode) {
+          return;
+        }
+
+        if (!lastMeterAt || now - lastMeterAt >= 90) {
+          const data = new Uint8Array(analyserNode.fftSize);
+          analyserNode.getByteTimeDomainData(data);
+          let sumSquares = 0;
+          for (const value of data) {
+            const normalized = (value - 128) / 128;
+            sumSquares += normalized * normalized;
+          }
+          const rms = Math.sqrt(sumSquares / data.length);
+          meterBuffer.push(clamp(rms * 3.8, 0, 1));
+          if (meterBuffer.length > 36) {
+            meterBuffer.shift();
+          }
+          lastMeterAt = now;
+        }
+
+        if (!lastRhythmPublishAt || now - lastRhythmPublishAt >= 70) {
+          publishLiveRhythm(true);
+          lastRhythmPublishAt = now;
+        }
+
+        meterFrame = window.requestAnimationFrame(sampleAudioMeter);
+      }
+
+      function consumeRhythmSnapshot() {
+        const samples = meterBuffer.length ? meterBuffer.slice(-20) : [];
+        const volume = samples.length ? samples.reduce((sum, value) => sum + value, 0) / samples.length : 0;
+
+        if (samples.length > 4) {
+          meterBuffer = samples.slice(-4);
+        } else {
+          meterBuffer = [];
+        }
+
+        return {
+          samples,
+          volume,
+          source: samples.length ? "audio" : "derived",
+        };
+      }
+
+      async function publishLiveRhythm(active = true) {
+        const samples = meterBuffer.length ? meterBuffer.slice(-20) : [0];
+        const volume = samples.reduce((sum, value) => sum + value, 0) / Math.max(1, samples.length);
+
+        try {
+          await fetch(rhythmEndpoint, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              samples,
+              volume,
+              interruption: 0,
+              active,
+              source: "audio",
+            }),
+          });
+        } catch (_error) {
+          // Keep speech capture resilient even if the overlay app is restarting.
+        }
+      }
+
+      async function postCaption(text, rhythm = consumeRhythmSnapshot()) {
         const response = await fetch(endpoint, {
           method: "POST",
           headers: {
-            "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
+            "Content-Type": "application/json",
           },
-          body,
+          body: JSON.stringify({ text, rhythm }),
         });
 
         if (!response.ok) {
@@ -146,7 +280,7 @@
         }
       }
 
-      function startRecognition() {
+      async function startRecognition() {
         if (!SpeechRecognition) {
           setStatus("Speech recognition is not available in this browser.");
           return;
@@ -212,16 +346,19 @@
         recognition.onend = () => {
           startButton.disabled = false;
           stopButton.disabled = true;
+          stopAudioMeter();
 
           if (shouldKeepListening) {
             setStatus("Restarting speech recognition...");
             recognition.start();
+            startAudioMeter();
             return;
           }
 
           setStatus("Microphone idle.");
         };
 
+        await startAudioMeter();
         recognition.start();
       }
 
@@ -235,6 +372,7 @@
         if (recognition) {
           recognition.stop();
         }
+        stopAudioMeter();
       });
 
       if (SpeechRecognition) {

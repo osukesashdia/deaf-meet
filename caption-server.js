@@ -12,6 +12,7 @@ let server = null;
 let captionHistory = [];
 let currentPort = null;
 let captionHandler = null;
+let rhythmHandler = null;
 let nextSimulatedSeq = 1;
 
 function addToHistory(entry) {
@@ -80,12 +81,35 @@ function parseBody(request, body) {
   return querystring.parse(body);
 }
 
-function createCaptionData({ seq, lang, text, simulated = false }) {
+function normalizeRhythm(value) {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const samples = Array.isArray(value.samples)
+    ? value.samples
+        .map((entry) => Number(entry))
+        .filter((entry) => Number.isFinite(entry))
+    : [];
+  const volume = Number(value.volume);
+  const interruption = Number(value.interruption);
+
+  return {
+    ...(samples.length ? { samples } : {}),
+    ...(Number.isFinite(volume) ? { volume } : {}),
+    ...(Number.isFinite(interruption) ? { interruption } : {}),
+    ...(typeof value.source === "string" && value.source.trim() ? { source: value.source.trim() } : {}),
+  };
+}
+
+function createCaptionData({ seq, lang, text, simulated = false, rhythm }) {
+  const normalizedRhythm = normalizeRhythm(rhythm);
   return {
     seq: Number.isFinite(Number(seq)) ? Number(seq) : nextSimulatedSeq++,
     lang: typeof lang === "string" && lang.trim() ? lang.trim() : "en",
     text: text.trim(),
     timestamp: Date.now(),
+    ...(normalizedRhythm && Object.keys(normalizedRhythm).length ? { rhythm: normalizedRhythm } : {}),
     ...(simulated ? { simulated: true } : {}),
   };
 }
@@ -104,6 +128,7 @@ async function handleCaption(request, response, parsedUrl) {
     seq: body.seq,
     lang: body.lang,
     text,
+    rhythm: body.rhythm,
   });
 
   addToHistory(caption);
@@ -132,6 +157,7 @@ async function handleSimulate(request, response) {
     lang: body.lang,
     text,
     simulated: true,
+    rhythm: body.rhythm,
   });
 
   addToHistory(caption);
@@ -140,6 +166,27 @@ async function handleSimulate(request, response) {
   }
 
   sendJson(response, 200, { ok: true, caption });
+}
+
+async function handleRhythm(request, response) {
+  const rawBody = await readRequestBody(request);
+  const body = parseBody(request, rawBody);
+  const rhythm = normalizeRhythm(body.rhythm || body);
+
+  if (!rhythm || !Object.keys(rhythm).length) {
+    sendJson(response, 200, { ok: true, ignored: true });
+    return;
+  }
+
+  if (typeof rhythmHandler === "function") {
+    rhythmHandler({
+      ...rhythm,
+      active: body.active === true || body.active === "true" || Number(rhythm.volume) > 0.025,
+      timestamp: Date.now(),
+    });
+  }
+
+  sendJson(response, 200, { ok: true });
 }
 
 async function routeRequest(request, response) {
@@ -181,6 +228,11 @@ async function routeRequest(request, response) {
       return;
     }
 
+    if (request.method === "POST" && parsedUrl.pathname === "/rhythm") {
+      await handleRhythm(request, response);
+      return;
+    }
+
     sendJson(response, 404, { ok: false, error: "Not found" });
   } catch (error) {
     sendJson(response, 500, {
@@ -190,12 +242,13 @@ async function routeRequest(request, response) {
   }
 }
 
-function startCaptionServer(port, onCaption) {
+function startCaptionServer(port, onCaption, onRhythm) {
   if (server) {
     return Promise.resolve({ running: true, port: currentPort });
   }
 
   captionHandler = onCaption;
+  rhythmHandler = onRhythm;
   currentPort = port;
 
   return new Promise((resolve, reject) => {

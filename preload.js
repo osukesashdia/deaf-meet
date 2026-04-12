@@ -7,6 +7,9 @@ contextBridge.exposeInMainWorld("captionBridge", {
   onSettingsUpdate(callback) {
     ipcRenderer.on("settings:update", (_event, data) => callback(data));
   },
+  onLiveRhythm(callback) {
+    ipcRenderer.on("rhythm:live", (_event, data) => callback(data));
+  },
   onClearCaptions(callback) {
     ipcRenderer.on("caption:clear", callback);
   },
@@ -21,6 +24,9 @@ contextBridge.exposeInMainWorld("captionBridge", {
   },
   injectCaption(payload) {
     ipcRenderer.send("caption:inject", payload);
+  },
+  updateLiveRhythm(payload) {
+    ipcRenderer.send("rhythm:update", payload);
   },
   clearCaptions() {
     ipcRenderer.send("caption:clear");

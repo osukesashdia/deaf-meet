@@ -231,6 +231,47 @@
         color: var(--muted);
         font-size: 12px;
       }
+
+      .feed-rhythm {
+        margin-top: 10px;
+        display: grid;
+        gap: 8px;
+      }
+
+      .rhythm-chart {
+        width: 100%;
+        height: 42px;
+        border-radius: 12px;
+        background: rgba(29, 20, 12, 0.06);
+        border: 1px solid rgba(95, 72, 45, 0.1);
+        overflow: hidden;
+      }
+
+      .rhythm-chart svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .rhythm-chart .interruption-line {
+        stroke-dasharray: 4 4;
+      }
+
+      .rhythm-meta {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .rhythm-pill {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(29, 20, 12, 0.08);
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
     </style>
   </head>
   <body>
@@ -362,6 +403,13 @@
       let recognition = null;
       let shouldKeepListening = false;
       let port = 4153;
+      let audioContext = null;
+      let analyserNode = null;
+      let mediaStream = null;
+      let meterFrame = 0;
+      let meterBuffer = [];
+      let lastMeterAt = 0;
+      let lastRhythmPublishAt = 0;
 
       function buildLocalCaptionUrl() {
         return `http://127.0.0.1:${port}/caption`;
@@ -399,6 +447,189 @@
         }
 
         return `${Math.round(Number(entry.emotionScore) * 100)}%`;
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function formatPercent(value) {
+        return `${Math.round(clamp(Number(value) || 0, 0, 1) * 100)}%`;
+      }
+
+      function buildSparklinePoints(samples = [], width = 240, height = 42) {
+        if (!samples.length) {
+          return `0,${height - 6} ${width},${height - 6}`;
+        }
+
+        return samples
+          .map((sample, index) => {
+            const x = samples.length === 1 ? width / 2 : (index / (samples.length - 1)) * width;
+            const y = height - 6 - clamp(Number(sample) || 0, 0, 1) * (height - 12);
+            return `${x.toFixed(2)},${y.toFixed(2)}`;
+          })
+          .join(" ");
+      }
+
+      function renderRhythmMarkup(entry) {
+        const rhythm = entry.rhythm || {};
+        const samples = Array.isArray(rhythm.samples) ? rhythm.samples : [];
+        const interruptionSamples = Array.from(
+          { length: Math.max(samples.length, 2) },
+          () => clamp(Number(rhythm.interruption) || 0, 0, 1)
+        );
+        const points = buildSparklinePoints(samples);
+        const interruptionPoints = buildSparklinePoints(interruptionSamples);
+        const volume = formatPercent(rhythm.volume);
+        const interruption = formatPercent(rhythm.interruption);
+
+        return `
+          <div class="feed-rhythm">
+            <div class="rhythm-chart" aria-hidden="true">
+              <svg viewBox="0 0 240 42" preserveAspectRatio="none">
+                <polyline
+                  fill="none"
+                  stroke="rgba(184, 92, 56, 0.95)"
+                  stroke-width="3"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  points="${points}"
+                ></polyline>
+                <polyline
+                  class="interruption-line"
+                  fill="none"
+                  stroke="rgba(32, 22, 15, 0.55)"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  points="${interruptionPoints}"
+                ></polyline>
+              </svg>
+            </div>
+            <div class="rhythm-meta">
+              <span class="rhythm-pill">Volume ${volume}</span>
+              <span class="rhythm-pill">Interruption ${interruption}</span>
+            </div>
+          </div>
+        `;
+      }
+
+      function publishLiveRhythm(active = true) {
+        if (!window.captionBridge || typeof window.captionBridge.updateLiveRhythm !== "function") {
+          return;
+        }
+
+        const samples = meterBuffer.length ? meterBuffer.slice(-20) : [0];
+        const volume = samples.reduce((sum, value) => sum + value, 0) / Math.max(1, samples.length);
+        window.captionBridge.updateLiveRhythm({
+          samples,
+          volume,
+          interruption: 0,
+          active,
+          source: "audio",
+          timestamp: Date.now(),
+        });
+      }
+
+      async function startAudioMeter() {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          return;
+        }
+
+        if (mediaStream) {
+          return;
+        }
+
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+          audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          const source = audioContext.createMediaStreamSource(mediaStream);
+          analyserNode = audioContext.createAnalyser();
+          analyserNode.fftSize = 512;
+          analyserNode.smoothingTimeConstant = 0.78;
+          source.connect(analyserNode);
+          meterBuffer = [];
+          lastMeterAt = 0;
+          lastRhythmPublishAt = 0;
+          sampleAudioMeter();
+        } catch (_error) {
+          mediaStream = null;
+        }
+      }
+
+      function stopAudioMeter() {
+        if (meterFrame) {
+          window.cancelAnimationFrame(meterFrame);
+          meterFrame = 0;
+        }
+
+        if (mediaStream) {
+          mediaStream.getTracks().forEach((track) => track.stop());
+          mediaStream = null;
+        }
+
+        if (audioContext) {
+          audioContext.close();
+          audioContext = null;
+        }
+
+        analyserNode = null;
+        meterBuffer = [];
+        lastRhythmPublishAt = 0;
+        publishLiveRhythm(false);
+      }
+
+      function sampleAudioMeter(now = 0) {
+        if (!analyserNode) {
+          return;
+        }
+
+        if (!lastMeterAt || now - lastMeterAt >= 90) {
+          const data = new Uint8Array(analyserNode.fftSize);
+          analyserNode.getByteTimeDomainData(data);
+          let sumSquares = 0;
+          for (const value of data) {
+            const normalized = (value - 128) / 128;
+            sumSquares += normalized * normalized;
+          }
+          const rms = Math.sqrt(sumSquares / data.length);
+          const boosted = clamp(rms * 3.8, 0, 1);
+          meterBuffer.push(boosted);
+          if (meterBuffer.length > 36) {
+            meterBuffer.shift();
+          }
+          lastMeterAt = now;
+        }
+
+        if (!lastRhythmPublishAt || now - lastRhythmPublishAt >= 70) {
+          publishLiveRhythm(true);
+          lastRhythmPublishAt = now;
+        }
+
+        meterFrame = window.requestAnimationFrame(sampleAudioMeter);
+      }
+
+      function consumeRhythmSnapshot() {
+        const samples = meterBuffer.length ? meterBuffer.slice(-20) : [];
+        const volume = samples.length ? samples.reduce((sum, value) => sum + value, 0) / samples.length : 0;
+
+        if (samples.length > 4) {
+          meterBuffer = samples.slice(-4);
+        } else {
+          meterBuffer = [];
+        }
+
+        return {
+          samples,
+          volume,
+          source: samples.length ? "audio" : "derived",
+        };
       }
 
       function refreshLocalUrl() {
@@ -461,6 +692,7 @@
           <div class="emotion-meta">
             <span class="emotion-score">${escapeHtml(entry.emotionSource || "model")}${formatEmotionScore(entry) ? ` · ${formatEmotionScore(entry)}` : ""}</span>
           </div>
+          ${renderRhythmMarkup(entry)}
         `;
         feed.prepend(item);
 
@@ -469,7 +701,7 @@
         }
       }
 
-      function injectCaption(text, source = "speech") {
+      function injectCaption(text, source = "speech", rhythm = consumeRhythmSnapshot()) {
         const normalized = String(text || "").trim();
         if (!normalized) {
           return;
@@ -479,10 +711,11 @@
           text: normalized,
           lang: "en",
           source,
+          rhythm,
         });
       }
 
-      function startRecognition() {
+      async function startRecognition() {
         if (!SpeechRecognition) {
           setSpeechStatus("Speech recognition unavailable", "This Chromium runtime does not expose the SpeechRecognition API.");
           return;
@@ -545,16 +778,19 @@
         recognition.onend = () => {
           startListeningButton.disabled = false;
           stopListeningButton.disabled = true;
+          stopAudioMeter();
 
           if (shouldKeepListening) {
             setSpeechStatus("Reconnecting", "Speech recognition paused briefly. Restarting...");
             recognition.start();
+            startAudioMeter();
             return;
           }
 
           setSpeechStatus("Microphone idle", "Click Start Listening and allow microphone access.");
         };
 
+        await startAudioMeter();
         recognition.start();
       }
 
@@ -632,6 +868,7 @@
         if (recognition) {
           recognition.stop();
         }
+        stopAudioMeter();
       });
 
       openBrowserCaptureButton.addEventListener("click", () => {

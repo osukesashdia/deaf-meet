@@ -49,6 +49,8 @@
         overflow: hidden;
         position: relative;
         transform: translate(0, 0);
+        display: grid;
+        gap: 12px;
       }
 
       .conversation-panel.editable {
@@ -120,7 +122,7 @@
         gap: 12px;
         align-items: stretch;
         width: 100%;
-        max-height: 240px;
+        min-height: 0;
         overflow-y: auto;
         overflow-x: hidden;
         padding-right: 6px;
@@ -136,9 +138,8 @@
       }
 
       .caption-pill {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
         gap: 14px;
         max-width: 100%;
         padding: 14px 22px;
@@ -223,7 +224,6 @@
       }
 
       .caption-text {
-        flex: 1;
         min-width: 0;
       }
 
@@ -237,6 +237,91 @@
         letter-spacing: 0.03em;
         text-transform: uppercase;
         white-space: nowrap;
+      }
+
+      .live-rhythm {
+        display: grid;
+        gap: 8px;
+        padding: 10px 12px 12px;
+        border-radius: 22px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+      }
+
+      .theme-light .live-rhythm,
+      .theme-yellow .live-rhythm {
+        background: rgba(0, 0, 0, 0.05);
+        border-color: rgba(0, 0, 0, 0.08);
+      }
+
+      .rhythm-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .rhythm-title {
+        opacity: 0.82;
+      }
+
+      .rhythm-chart {
+        width: 100%;
+        height: 46px;
+        border-radius: 14px;
+        background: rgba(255, 255, 255, 0.07);
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+      }
+
+      .rhythm-chart svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .rhythm-line {
+        fill: none;
+        stroke: rgba(255, 255, 255, 0.88);
+        stroke-width: 3;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .rhythm-line.interruption {
+        stroke: rgba(255, 180, 120, 0.9);
+        stroke-width: 2;
+        stroke-dasharray: 4 4;
+      }
+
+      .theme-light .rhythm-line,
+      .theme-yellow .rhythm-line {
+        stroke: rgba(23, 18, 10, 0.88);
+      }
+
+      .theme-light .rhythm-line.interruption,
+      .theme-yellow .rhythm-line.interruption {
+        stroke: rgba(184, 92, 56, 0.95);
+      }
+
+      .rhythm-pill {
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.12);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: inherit;
+      }
+
+      .theme-light .rhythm-pill,
+      .theme-yellow .rhythm-pill {
+        background: rgba(0, 0, 0, 0.08);
       }
 
       .theme-outline .caption-pill.emotion-happy {
@@ -259,6 +344,10 @@
         color: #d8b5ff;
       }
 
+      .theme-outline .live-rhythm {
+        background: rgba(0, 0, 0, 0.28);
+      }
+
       @keyframes slideIn {
         from {
           opacity: 0;
@@ -277,6 +366,18 @@
         <div class="edit-toolbar">
           <div class="edit-label">Edit Mode: drag panel and use corner to resize</div>
         </div>
+        <div class="live-rhythm">
+          <div class="rhythm-header">
+            <span class="rhythm-title">Live Sound Rhythm</span>
+            <span id="rhythm-meta" class="rhythm-pill">Waiting</span>
+          </div>
+          <div class="rhythm-chart" aria-hidden="true">
+            <svg viewBox="0 0 260 46" preserveAspectRatio="none">
+              <polyline id="volume-line" class="rhythm-line" points="0,40 260,40"></polyline>
+              <polyline id="interruption-line" class="rhythm-line interruption" points="0,40 260,40"></polyline>
+            </svg>
+          </div>
+        </div>
         <div id="caption-stack"></div>
         <div class="resize-handle" aria-hidden="true"></div>
       </div>
@@ -287,6 +388,9 @@
       const stack = document.getElementById("caption-stack");
       const panel = document.querySelector(".conversation-panel");
       const resizeHandle = document.querySelector(".resize-handle");
+      const volumeLine = document.getElementById("volume-line");
+      const interruptionLine = document.getElementById("interruption-line");
+      const rhythmMeta = document.getElementById("rhythm-meta");
 
       const settings = {
         theme: "dark",
@@ -300,6 +404,13 @@
         editMode: false,
       };
       let dragState = null;
+      let liveRhythmState = {
+        samples: new Array(36).fill(0.02),
+        interruption: 0,
+        active: false,
+        lastUpdateAt: 0,
+      };
+      let rhythmAnimationFrame = 0;
 
       const demoCaptions = [
         "Hello everyone, thanks for joining today.",
@@ -344,10 +455,93 @@
         stage.className = `theme-${settings.theme} position-${settings.position}`;
         stack.style.fontSize = `${settings.fontSize}px`;
         panel.style.width = `min(100%, ${settings.panelWidth}px)`;
-        stack.style.maxHeight = `${settings.panelHeight}px`;
+        panel.style.height = `${settings.panelHeight}px`;
         panel.style.transform = `translate(${settings.panelOffsetX}px, ${settings.panelOffsetY}px)`;
         panel.classList.toggle("editable", Boolean(settings.editMode));
         trimCaptions();
+      }
+
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function formatPercent(value) {
+        return `${Math.round(clamp(Number(value) || 0, 0, 1) * 100)}%`;
+      }
+
+      function buildSparklinePoints(samples = [], width = 260, height = 46) {
+        if (!samples.length) {
+          return `0,${height - 6} ${width},${height - 6}`;
+        }
+
+        return samples
+          .map((sample, index) => {
+            const x = samples.length === 1 ? width / 2 : (index / (samples.length - 1)) * width;
+            const y = height - 6 - clamp(Number(sample) || 0, 0, 1) * (height - 12);
+            return `${x.toFixed(2)},${y.toFixed(2)}`;
+          })
+          .join(" ");
+      }
+
+      function renderLiveRhythm() {
+        const samples = liveRhythmState.samples.slice(-36);
+        const interruptionSamples = Array.from({ length: Math.max(samples.length, 2) }, () => liveRhythmState.interruption);
+        volumeLine.setAttribute("points", buildSparklinePoints(samples));
+        interruptionLine.setAttribute("points", buildSparklinePoints(interruptionSamples));
+
+        const average = samples.length
+          ? samples.reduce((sum, value) => sum + value, 0) / samples.length
+          : 0;
+        rhythmMeta.textContent = liveRhythmState.active
+          ? `Live ${formatPercent(average)} · Interrupt ${formatPercent(liveRhythmState.interruption)}`
+          : "Listening standby";
+      }
+
+      function pushLiveRhythmSamples(samples = [], interruption = 0, active = true) {
+        const normalized = Array.isArray(samples)
+          ? samples
+              .map((value) => clamp(Number(value) || 0, 0, 1))
+              .slice(-8)
+          : [];
+
+        if (!normalized.length) {
+          normalized.push(0);
+        }
+
+        liveRhythmState.samples.push(...normalized);
+        while (liveRhythmState.samples.length > 36) {
+          liveRhythmState.samples.shift();
+        }
+
+        liveRhythmState.interruption = clamp(interruption, 0, 1);
+        liveRhythmState.active = Boolean(active);
+        liveRhythmState.lastUpdateAt = Date.now();
+        renderLiveRhythm();
+      }
+
+      function updateLiveRhythm(entry = {}) {
+        const rhythm = entry.rhythm || entry;
+        const samples = Array.isArray(rhythm.samples) ? rhythm.samples : [];
+        pushLiveRhythmSamples(samples, Number(rhythm.interruption) || 0, Boolean(rhythm.active || samples.some((value) => value > 0.025)));
+      }
+
+      function animateRhythm() {
+        const now = Date.now();
+        const age = now - liveRhythmState.lastUpdateAt;
+
+        if (!liveRhythmState.active || age > 160) {
+          const lastValue = liveRhythmState.samples[liveRhythmState.samples.length - 1] || 0;
+          const nextValue = age > 900 ? 0 : lastValue * 0.9;
+          liveRhythmState.samples.push(nextValue);
+          while (liveRhythmState.samples.length > 36) {
+            liveRhythmState.samples.shift();
+          }
+          liveRhythmState.interruption *= 0.92;
+          liveRhythmState.active = nextValue > 0.03;
+          renderLiveRhythm();
+        }
+
+        rhythmAnimationFrame = window.requestAnimationFrame(animateRhythm);
       }
 
       function trimCaptions() {
@@ -376,10 +570,24 @@
 
       function startDemoMode() {
         let index = 0;
-        renderCaption({ text: demoCaptions[index] });
+        const buildDemoEntry = (text, step) => ({
+          text,
+          rhythm: {
+            samples: Array.from({ length: 20 }, (_value, sampleIndex) =>
+              clamp(0.22 + Math.sin((sampleIndex + step) * 0.42) * 0.18 + ((sampleIndex + step) % 5) * 0.03, 0.06, 0.92)
+            ),
+            interruption: step % 3 === 0 ? 0.48 : 0.12,
+          },
+        });
+
+        const initialEntry = buildDemoEntry(demoCaptions[index], index);
+        updateLiveRhythm(initialEntry);
+        renderCaption(initialEntry);
         window.setInterval(() => {
           index = (index + 1) % demoCaptions.length;
-          renderCaption({ text: demoCaptions[index] });
+          const nextEntry = buildDemoEntry(demoCaptions[index], index);
+          updateLiveRhythm(nextEntry);
+          renderCaption(nextEntry);
         }, DEMO_TIMEOUT);
       }
 
@@ -438,15 +646,27 @@
       if (window.captionBridge) {
         window.captionBridge.onCaption((entry) => {
           if (entry && entry.text) {
+            updateLiveRhythm(entry);
             renderCaption(entry);
           }
         });
         window.captionBridge.onClearCaptions(() => {
           stack.innerHTML = "";
+          liveRhythmState = {
+            samples: new Array(36).fill(0.02),
+            interruption: 0,
+            active: false,
+            lastUpdateAt: Date.now(),
+          };
+          renderLiveRhythm();
         });
 
         window.captionBridge.onSettingsUpdate((nextSettings) => {
           applySettings(nextSettings);
+        });
+
+        window.captionBridge.onLiveRhythm((payload) => {
+          updateLiveRhythm(payload);
         });
 
         panel.addEventListener("pointerdown", (event) => {
@@ -468,6 +688,8 @@
       }
 
       applySettings(settings);
+      renderLiveRhythm();
+      animateRhythm();
     </script>
   </body>
 </html>

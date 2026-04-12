@@ -9,6 +9,8 @@ const {
 const DEFAULT_PORT = Number(process.env.CAPTION_PORT) || 4153;
 const OVERLAY_HEIGHT = 160;
 const CONTROL_SIZE = { width: 420, height: 620 };
+const RHYTHM_SAMPLE_SIZE = 20;
+const INTERRUPTION_WINDOW_MS = 1400;
 const EMOTION_MODEL_URL =
   "https://api-inference.huggingface.co/models/j-hartmann/emotion-english-distilroberta-base";
 const EMOTION_REQUEST_TIMEOUT_MS = 10000;
@@ -37,6 +39,116 @@ const overlaySettings = {
 let nextInjectedSeq = 1;
 const emotionResultCache = new Map();
 let captionDispatchChain = Promise.resolve();
+let lastCaptionTimestamp = 0;
+let latestLiveRhythm = {
+  samples: new Array(RHYTHM_SAMPLE_SIZE).fill(0),
+  volume: 0,
+  interruption: 0,
+  active: false,
+  timestamp: Date.now(),
+  source: "derived",
+};
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function normalizeRhythmSamples(samples = []) {
+  const normalized = Array.isArray(samples)
+    ? samples
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+        .map((value) => clamp(value, 0, 1))
+    : [];
+
+  if (!normalized.length) {
+    return [];
+  }
+
+  if (normalized.length <= RHYTHM_SAMPLE_SIZE) {
+    return normalized;
+  }
+
+  const compacted = [];
+  const stride = normalized.length / RHYTHM_SAMPLE_SIZE;
+  for (let index = 0; index < RHYTHM_SAMPLE_SIZE; index += 1) {
+    const sampleIndex = Math.min(normalized.length - 1, Math.floor(index * stride));
+    compacted.push(normalized[sampleIndex]);
+  }
+  return compacted;
+}
+
+function buildFallbackRhythmSamples(text) {
+  const normalized = String(text || "").trim();
+  if (!normalized) {
+    return [0.18, 0.15, 0.2, 0.17, 0.14, 0.16];
+  }
+
+  const emphasisBoost = /[!?]/.test(normalized) ? 0.18 : 0;
+  const uppercaseBoost = /[A-Z]{3,}/.test(normalized) ? 0.16 : 0;
+  const urgencyBoost = /(urgent|stop|now|wait|please|listen)/i.test(normalized) ? 0.14 : 0;
+  const lengthBoost = clamp(normalized.length / 180, 0.05, 0.24);
+  const base = clamp(0.2 + emphasisBoost + uppercaseBoost + urgencyBoost + lengthBoost, 0.16, 0.88);
+
+  return Array.from({ length: RHYTHM_SAMPLE_SIZE }, (_value, index) => {
+    const wave = Math.sin((index / Math.max(1, RHYTHM_SAMPLE_SIZE - 1)) * Math.PI * 2.2) * 0.12;
+    const jitter = ((index % 4) - 1.5) * 0.025;
+    return clamp(base + wave + jitter, 0.08, 0.96);
+  });
+}
+
+function deriveRhythm(payload, text, timestamp) {
+  const payloadRhythm = payload && typeof payload.rhythm === "object" ? payload.rhythm : {};
+  const samples = normalizeRhythmSamples(payloadRhythm.samples);
+  const rhythmSamples = samples.length ? samples : buildFallbackRhythmSamples(text);
+  const averageVolume =
+    rhythmSamples.reduce((sum, value) => sum + value, 0) / Math.max(1, rhythmSamples.length);
+  const explicitVolume = Number(payloadRhythm.volume);
+  const volume = Number.isFinite(explicitVolume) ? clamp(explicitVolume, 0, 1) : clamp(averageVolume, 0, 1);
+  const gap = lastCaptionTimestamp > 0 ? timestamp - lastCaptionTimestamp : Number.POSITIVE_INFINITY;
+  const derivedInterruption = gap < INTERRUPTION_WINDOW_MS ? clamp(1 - gap / INTERRUPTION_WINDOW_MS, 0, 1) : 0;
+  const explicitInterruption = Number(payloadRhythm.interruption);
+  const interruption = Number.isFinite(explicitInterruption)
+    ? clamp(explicitInterruption, 0, 1)
+    : derivedInterruption;
+
+  lastCaptionTimestamp = timestamp;
+
+  return {
+    samples: rhythmSamples,
+    volume,
+    interruption,
+    source: samples.length ? payloadRhythm.source || "audio" : "derived",
+  };
+}
+
+function normalizeLiveRhythm(payload = {}) {
+  const samples = normalizeRhythmSamples(payload.samples);
+  const explicitVolume = Number(payload.volume);
+  const volume = Number.isFinite(explicitVolume)
+    ? clamp(explicitVolume, 0, 1)
+    : samples.length
+      ? clamp(samples.reduce((sum, value) => sum + value, 0) / samples.length, 0, 1)
+      : 0;
+  const explicitInterruption = Number(payload.interruption);
+
+  return {
+    samples: samples.length ? samples : new Array(RHYTHM_SAMPLE_SIZE).fill(0),
+    volume,
+    interruption: Number.isFinite(explicitInterruption) ? clamp(explicitInterruption, 0, 1) : 0,
+    active: Boolean(payload.active || volume > 0.025),
+    timestamp: Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now(),
+    source: typeof payload.source === "string" && payload.source.trim() ? payload.source.trim() : "audio",
+  };
+}
+
+function broadcastLiveRhythm(payload = {}) {
+  latestLiveRhythm = normalizeLiveRhythm(payload);
+
+  if (overlayWindow && !overlayWindow.isDestroyed()) {
+    overlayWindow.webContents.send("rhythm:live", latestLiveRhythm);
+  }
+}
 
 function openInGoogleChrome(url) {
   const fallback = () => shell.openExternal(url);
@@ -217,6 +329,7 @@ async function normalizeCaption(payload = {}) {
 
   const numericSeq = Number(payload.seq);
   const seq = Number.isFinite(numericSeq) ? numericSeq : nextInjectedSeq++;
+  const timestamp = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
   const detected = payload.detectedEmotion
     ? {
         label: String(payload.detectedEmotion).trim().toLowerCase(),
@@ -230,11 +343,12 @@ async function normalizeCaption(payload = {}) {
     seq,
     lang: typeof payload.lang === "string" && payload.lang.trim() ? payload.lang.trim() : "en",
     text,
-    timestamp: Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now(),
+    timestamp,
     emotion: payload.emotion || detected.emotion,
     detectedEmotion: detected.label,
     emotionScore: detected.score,
     emotionSource: detected.source,
+    rhythm: deriveRhythm(payload, text, timestamp),
     source: payload.source || "http",
     ...(payload.simulated ? { simulated: true } : {}),
   };
@@ -349,6 +463,7 @@ function createOverlayWindow() {
 
   overlayWindow.webContents.on("did-finish-load", () => {
     sendSettingsUpdate();
+    overlayWindow.webContents.send("rhythm:live", latestLiveRhythm);
   });
 
   overlayPinInterval = setInterval(() => {
@@ -458,9 +573,16 @@ function registerIpc() {
     });
   });
 
+  ipcMain.on("rhythm:update", (_event, payload = {}) => {
+    broadcastLiveRhythm(payload);
+  });
+
   ipcMain.on("caption:clear", () => {
+    lastCaptionTimestamp = 0;
+    latestLiveRhythm = normalizeLiveRhythm({});
     if (overlayWindow && !overlayWindow.isDestroyed()) {
       overlayWindow.webContents.send("caption:clear");
+      overlayWindow.webContents.send("rhythm:live", latestLiveRhythm);
     }
     if (controlWindow && !controlWindow.isDestroyed()) {
       controlWindow.webContents.send("caption:clear");
@@ -484,7 +606,7 @@ async function bootstrap() {
   registerIpc();
 
   try {
-    await startCaptionServer(DEFAULT_PORT, broadcastCaption);
+    await startCaptionServer(DEFAULT_PORT, broadcastCaption, broadcastLiveRhythm);
     captionServerState = {
       running: true,
       port: DEFAULT_PORT,
