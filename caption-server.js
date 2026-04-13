@@ -93,11 +93,31 @@ function normalizeRhythm(value) {
     : [];
   const volume = Number(value.volume);
   const interruption = Number(value.interruption);
+  const prosody = value.prosody && typeof value.prosody === "object" ? value.prosody : {};
+  const pitchHz = Number(prosody.pitchHz);
+  const pitchMean = Number(prosody.pitchMean);
+  const pitchRange = Number(prosody.pitchRange);
+  const voicedRatio = Number(prosody.voicedRatio);
 
   return {
     ...(samples.length ? { samples } : {}),
     ...(Number.isFinite(volume) ? { volume } : {}),
     ...(Number.isFinite(interruption) ? { interruption } : {}),
+    ...(
+      Number.isFinite(pitchHz) ||
+      Number.isFinite(pitchMean) ||
+      Number.isFinite(pitchRange) ||
+      Number.isFinite(voicedRatio)
+        ? {
+            prosody: {
+              ...(Number.isFinite(pitchHz) ? { pitchHz } : {}),
+              ...(Number.isFinite(pitchMean) ? { pitchMean } : {}),
+              ...(Number.isFinite(pitchRange) ? { pitchRange } : {}),
+              ...(Number.isFinite(voicedRatio) ? { voicedRatio } : {}),
+            },
+          }
+        : {}
+    ),
     ...(typeof value.source === "string" && value.source.trim() ? { source: value.source.trim() } : {}),
   };
 }

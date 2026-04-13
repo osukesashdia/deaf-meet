@@ -10,6 +10,9 @@ contextBridge.exposeInMainWorld("captionBridge", {
   onLiveRhythm(callback) {
     ipcRenderer.on("rhythm:live", (_event, data) => callback(data));
   },
+  onEmotionDebug(callback) {
+    ipcRenderer.on("emotion:debug", (_event, data) => callback(data));
+  },
   onClearCaptions(callback) {
     ipcRenderer.on("caption:clear", callback);
   },

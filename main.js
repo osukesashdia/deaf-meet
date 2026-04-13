@@ -78,6 +78,24 @@ function normalizeRhythmSamples(samples = []) {
   return compacted;
 }
 
+function normalizeProsody(prosody = {}) {
+  if (!prosody || typeof prosody !== "object") {
+    return {};
+  }
+
+  const pitchHz = Number(prosody.pitchHz);
+  const pitchMean = Number(prosody.pitchMean);
+  const pitchRange = Number(prosody.pitchRange);
+  const voicedRatio = Number(prosody.voicedRatio);
+
+  return {
+    ...(Number.isFinite(pitchHz) ? { pitchHz: clamp(pitchHz, 50, 500) } : {}),
+    ...(Number.isFinite(pitchMean) ? { pitchMean: clamp(pitchMean, 50, 500) } : {}),
+    ...(Number.isFinite(pitchRange) ? { pitchRange: clamp(pitchRange, 0, 1) } : {}),
+    ...(Number.isFinite(voicedRatio) ? { voicedRatio: clamp(voicedRatio, 0, 1) } : {}),
+  };
+}
+
 function buildFallbackRhythmSamples(text) {
   const normalized = String(text || "").trim();
   if (!normalized) {
@@ -100,6 +118,7 @@ function buildFallbackRhythmSamples(text) {
 function deriveRhythm(payload, text, timestamp) {
   const payloadRhythm = payload && typeof payload.rhythm === "object" ? payload.rhythm : {};
   const samples = normalizeRhythmSamples(payloadRhythm.samples);
+  const prosody = normalizeProsody(payloadRhythm.prosody);
   const rhythmSamples = samples.length ? samples : buildFallbackRhythmSamples(text);
   const averageVolume =
     rhythmSamples.reduce((sum, value) => sum + value, 0) / Math.max(1, rhythmSamples.length);
@@ -118,12 +137,14 @@ function deriveRhythm(payload, text, timestamp) {
     samples: rhythmSamples,
     volume,
     interruption,
+    ...(Object.keys(prosody).length ? { prosody } : {}),
     source: samples.length ? payloadRhythm.source || "audio" : "derived",
   };
 }
 
 function normalizeLiveRhythm(payload = {}) {
   const samples = normalizeRhythmSamples(payload.samples);
+  const prosody = normalizeProsody(payload.prosody);
   const explicitVolume = Number(payload.volume);
   const volume = Number.isFinite(explicitVolume)
     ? clamp(explicitVolume, 0, 1)
@@ -136,6 +157,7 @@ function normalizeLiveRhythm(payload = {}) {
     samples: samples.length ? samples : new Array(RHYTHM_SAMPLE_SIZE).fill(0),
     volume,
     interruption: Number.isFinite(explicitInterruption) ? clamp(explicitInterruption, 0, 1) : 0,
+    ...(Object.keys(prosody).length ? { prosody } : {}),
     active: Boolean(payload.active || volume > 0.025),
     timestamp: Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now(),
     source: typeof payload.source === "string" && payload.source.trim() ? payload.source.trim() : "audio",
@@ -147,6 +169,29 @@ function broadcastLiveRhythm(payload = {}) {
 
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send("rhythm:live", latestLiveRhythm);
+  }
+}
+
+function emitEmotionDebug(payload) {
+  const debugPayload = {
+    ...payload,
+    timestamp: Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now(),
+  };
+  const consolePayload = {
+    textResult: debugPayload.textResult || null,
+    audioResult: debugPayload.audioResult || null,
+    fusedResult: debugPayload.fusedResult || null,
+    fusionReason: debugPayload.fusionReason || null,
+  };
+
+  try {
+    console.log(JSON.stringify(consolePayload));
+  } catch (_error) {
+    console.log(consolePayload);
+  }
+
+  if (controlWindow && !controlWindow.isDestroyed()) {
+    controlWindow.webContents.send("emotion:debug", debugPayload);
   }
 }
 
@@ -212,6 +257,18 @@ function inferEmotionLabel(text) {
   return "neutral";
 }
 
+function inferTextSignals(text) {
+  const normalized = String(text || "").toLowerCase();
+
+  return {
+    positive: /(great|happy|glad|love|thanks|wonderful|nice|good news|smile|amazing|awesome)/.test(normalized),
+    sad: /(sorry|sad|difficult|hard|unfortunately|upset|miss|hurt|tired|loss)/.test(normalized),
+    urgent: /(stop|angry|mad|urgent|problem|wrong|frustrat|serious|now|immediately)/.test(normalized),
+    calm: /(calm|steady|okay|breathe|slow|gentle|relax|safe|fine|no worries)/.test(normalized),
+    celebratory: /(excited|wow|yes!|let's go|incredible|fantastic|celebrate)/.test(normalized),
+  };
+}
+
 function mapModelEmotionToOverlayEmotion(label) {
   switch (label) {
     case "joy":
@@ -243,7 +300,7 @@ function normalizeInferenceResponse(payload) {
   return [];
 }
 
-async function detectEmotion(text) {
+async function detectTextEmotion(text) {
   const normalizedText = String(text || "").trim();
   if (!normalizedText) {
     return {
@@ -321,6 +378,153 @@ async function detectEmotion(text) {
   }
 }
 
+function detectAudioEmotion(text, rhythm = {}) {
+  if (!rhythm || typeof rhythm !== "object") {
+    return null;
+  }
+
+  const prosody = rhythm.prosody && typeof rhythm.prosody === "object" ? rhythm.prosody : {};
+  const signals = inferTextSignals(text);
+  const volume = clamp(Number(rhythm.volume) || 0, 0, 1);
+  const interruption = clamp(Number(rhythm.interruption) || 0, 0, 1);
+  const pitchMean = Number(prosody.pitchMean);
+  const pitchRange = clamp(Number(prosody.pitchRange) || 0, 0, 1);
+  const voicedRatio = clamp(Number(prosody.voicedRatio) || 0, 0, 1);
+  const pitchMeanNorm = Number.isFinite(pitchMean) ? clamp((pitchMean - 100) / 180, 0, 1) : 0;
+  const arousal = clamp(
+    volume * 0.42 + interruption * 0.22 + pitchRange * 0.24 + pitchMeanNorm * 0.08 + voicedRatio * 0.04,
+    0,
+    1
+  );
+
+  if (arousal < 0.14 && pitchRange < 0.05 && !signals.sad && !signals.calm) {
+    return null;
+  }
+
+  let emotion = "neutral";
+
+  if (arousal >= 0.68) {
+    if (signals.urgent || interruption >= 0.38) {
+      emotion = "angry";
+    } else if (signals.positive || signals.celebratory || pitchRange >= 0.2 || pitchMeanNorm >= 0.5) {
+      emotion = "excited";
+    } else {
+      emotion = "excited";
+    }
+  } else if (arousal >= 0.42) {
+    if (signals.urgent) {
+      emotion = "angry";
+    } else if (signals.positive) {
+      emotion = "happy";
+    } else if (signals.calm) {
+      emotion = "calm";
+    } else if (pitchRange < 0.09 && interruption < 0.16) {
+      emotion = "calm";
+    }
+  } else {
+    if (signals.sad || (volume < 0.18 && pitchRange < 0.08 && pitchMeanNorm < 0.42)) {
+      emotion = "sad";
+    } else if (signals.calm || (interruption < 0.12 && pitchRange < 0.1 && voicedRatio >= 0.35)) {
+      emotion = "calm";
+    }
+  }
+
+  return {
+    label: emotion,
+    emotion,
+    source: "audio-heuristic",
+    score: arousal,
+    arousal,
+  };
+}
+
+function fuseEmotionDetections(textResult, audioResult) {
+  if (!audioResult) {
+    return {
+      result: textResult,
+      reason: "audio unavailable or below threshold",
+    };
+  }
+
+  if (!textResult) {
+    return {
+      result: audioResult,
+      reason: "text unavailable",
+    };
+  }
+
+  if (textResult.emotion === audioResult.emotion) {
+    return {
+      result: {
+        ...textResult,
+        source: `${textResult.source}+audio`,
+        score: Math.max(Number(textResult.score) || 0, Number(audioResult.score) || 0),
+      },
+      reason: "text and audio agree",
+    };
+  }
+
+  if (textResult.source === "fallback") {
+    if (textResult.emotion === "neutral" && audioResult.emotion !== "neutral") {
+      return {
+        result: audioResult,
+        reason: "audio overrides fallback neutral text",
+      };
+    }
+
+    if (audioResult.score >= 0.72) {
+      return {
+        result: audioResult,
+        reason: "strong audio overrides fallback text",
+      };
+    }
+  }
+
+  if (textResult.emotion === "happy" && audioResult.emotion === "excited" && audioResult.arousal >= 0.62) {
+    return {
+      result: audioResult,
+      reason: "audio upgrades happy to excited",
+    };
+  }
+
+  if (textResult.emotion === "neutral" && ["calm", "sad", "angry", "excited"].includes(audioResult.emotion)) {
+    return {
+      result: audioResult,
+      reason: "audio overrides neutral text",
+    };
+  }
+
+  if (audioResult.emotion === "angry" && audioResult.arousal >= 0.8) {
+    return {
+      result: audioResult,
+      reason: "very strong angry audio override",
+    };
+  }
+
+  return {
+    result: textResult,
+    reason: "text kept after fusion",
+  };
+}
+
+async function detectEmotion(text, rhythm = {}) {
+  const textResult = await detectTextEmotion(text);
+  const audioResult = detectAudioEmotion(text, rhythm);
+  const fused = fuseEmotionDetections(textResult, audioResult);
+
+  return {
+    result: fused.result,
+    debug: {
+      text,
+      rhythm,
+      textResult,
+      audioResult,
+      fusedResult: fused.result,
+      fusionReason: fused.reason,
+    },
+  };
+}
+
 async function normalizeCaption(payload = {}) {
   const text = String(payload.text || "").trim();
   if (!text) {
@@ -330,6 +534,8 @@ async function normalizeCaption(payload = {}) {
   const numericSeq = Number(payload.seq);
   const seq = Number.isFinite(numericSeq) ? numericSeq : nextInjectedSeq++;
   const timestamp = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
+  const rhythm = deriveRhythm(payload, text, timestamp);
+  let debugPayload = null;
   const detected = payload.detectedEmotion
     ? {
         label: String(payload.detectedEmotion).trim().toLowerCase(),
@@ -337,7 +543,19 @@ async function normalizeCaption(payload = {}) {
         source: payload.emotionSource || "provided",
         score: Number.isFinite(Number(payload.emotionScore)) ? Number(payload.emotionScore) : null,
       }
-    : await detectEmotion(text);
+    : ((result) => {
+        debugPayload = result.debug;
+        return result.result;
+      })(await detectEmotion(text, rhythm));
+
+  if (debugPayload) {
+    emitEmotionDebug({
+      seq,
+      timestamp,
+      source: payload.source || "http",
+      ...debugPayload,
+    });
+  }
 
   return {
     seq,
@@ -348,7 +566,7 @@ async function normalizeCaption(payload = {}) {
     detectedEmotion: detected.label,
     emotionScore: detected.score,
     emotionSource: detected.source,
-    rhythm: deriveRhythm(payload, text, timestamp),
+    rhythm,
     source: payload.source || "http",
     ...(payload.simulated ? { simulated: true } : {}),
   };

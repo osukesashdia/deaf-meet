@@ -272,6 +272,59 @@
         letter-spacing: 0.04em;
         text-transform: uppercase;
       }
+
+      .debug-panel {
+        display: grid;
+        gap: 12px;
+      }
+
+      .debug-summary {
+        display: grid;
+        gap: 10px;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .debug-box {
+        padding: 12px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.72);
+        border: 1px solid var(--line);
+      }
+
+      .debug-label {
+        color: var(--muted);
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .debug-value {
+        margin-top: 6px;
+        font-size: 20px;
+        font-weight: 700;
+        line-height: 1.2;
+      }
+
+      .debug-subvalue {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .debug-transcript {
+        padding: 12px;
+        border-radius: 16px;
+        background: rgba(255, 255, 255, 0.6);
+        border: 1px solid var(--line);
+        font-size: 13px;
+        line-height: 1.45;
+      }
+
+      @media (max-width: 520px) {
+        .debug-summary {
+          grid-template-columns: 1fr;
+        }
+      }
     </style>
   </head>
   <body>
@@ -346,6 +399,31 @@
       </section>
 
       <section class="card stack">
+        <h2>Emotion Debug</h2>
+        <div class="subtle">Live view of transcript, text result, audio result, and fused result.</div>
+        <div class="debug-panel">
+          <div id="debug-transcript" class="debug-transcript">Transcript will appear here.</div>
+          <div class="debug-summary">
+            <div class="debug-box">
+              <div class="debug-label">Text</div>
+              <div id="debug-text-emotion" class="debug-value">Waiting</div>
+              <div id="debug-text-source" class="debug-subvalue">No caption yet</div>
+            </div>
+            <div class="debug-box">
+              <div class="debug-label">Audio</div>
+              <div id="debug-audio-emotion" class="debug-value">Waiting</div>
+              <div id="debug-audio-source" class="debug-subvalue">No audio analysis yet</div>
+            </div>
+            <div class="debug-box">
+              <div class="debug-label">Fused</div>
+              <div id="debug-fused-emotion" class="debug-value">Waiting</div>
+              <div id="debug-fused-source" class="debug-subvalue">No fusion yet</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card stack">
         <h2>Live Feed</h2>
         <div id="feed">
           <div class="empty">Waiting for the first caption...</div>
@@ -398,6 +476,13 @@
       const clearConversationButton = document.getElementById("clear-conversation");
       const browserCaptureUrl = document.getElementById("browser-capture-url");
       const positionButtons = Array.from(document.querySelectorAll(".position-button"));
+      const debugTextEmotion = document.getElementById("debug-text-emotion");
+      const debugTextSource = document.getElementById("debug-text-source");
+      const debugAudioEmotion = document.getElementById("debug-audio-emotion");
+      const debugAudioSource = document.getElementById("debug-audio-source");
+      const debugFusedEmotion = document.getElementById("debug-fused-emotion");
+      const debugFusedSource = document.getElementById("debug-fused-source");
+      const debugTranscript = document.getElementById("debug-transcript");
 
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recognition = null;
@@ -408,6 +493,7 @@
       let mediaStream = null;
       let meterFrame = 0;
       let meterBuffer = [];
+      let pitchBuffer = [];
       let lastMeterAt = 0;
       let lastRhythmPublishAt = 0;
 
@@ -514,6 +600,76 @@
         `;
       }
 
+      function estimatePitchHz(signal, sampleRate) {
+        if (!signal || signal.length < 2 || !sampleRate) {
+          return 0;
+        }
+
+        let rms = 0;
+        for (const value of signal) {
+          rms += value * value;
+        }
+        rms = Math.sqrt(rms / signal.length);
+
+        if (rms < 0.01) {
+          return 0;
+        }
+
+        const minLag = Math.max(2, Math.floor(sampleRate / 400));
+        const maxLag = Math.min(signal.length - 1, Math.floor(sampleRate / 80));
+        let bestLag = 0;
+        let bestScore = 0;
+
+        for (let lag = minLag; lag <= maxLag; lag += 1) {
+          let correlation = 0;
+          let energyA = 0;
+          let energyB = 0;
+
+          for (let index = 0; index < signal.length - lag; index += 1) {
+            const current = signal[index];
+            const shifted = signal[index + lag];
+            correlation += current * shifted;
+            energyA += current * current;
+            energyB += shifted * shifted;
+          }
+
+          const normalized = correlation / Math.sqrt((energyA || 1) * (energyB || 1));
+          if (normalized > bestScore) {
+            bestScore = normalized;
+            bestLag = lag;
+          }
+        }
+
+        if (!bestLag || bestScore < 0.35) {
+          return 0;
+        }
+
+        return sampleRate / bestLag;
+      }
+
+      function summarizeProsody() {
+        const voiced = pitchBuffer.filter((value) => value > 0);
+        if (!voiced.length) {
+          return {
+            pitchHz: 0,
+            pitchMean: 0,
+            pitchRange: 0,
+            voicedRatio: 0,
+          };
+        }
+
+        const pitchMean = voiced.reduce((sum, value) => sum + value, 0) / voiced.length;
+        const pitchMin = Math.min(...voiced);
+        const pitchMax = Math.max(...voiced);
+
+        return {
+          pitchHz: voiced[voiced.length - 1],
+          pitchMean,
+          pitchRange: clamp((pitchMax - pitchMin) / 220, 0, 1),
+          voicedRatio: voiced.length / Math.max(1, pitchBuffer.length),
+        };
+      }
+
       function publishLiveRhythm(active = true) {
         if (!window.captionBridge || typeof window.captionBridge.updateLiveRhythm !== "function") {
           return;
@@ -525,6 +681,7 @@
           samples,
           volume,
           interruption: 0,
+          prosody: summarizeProsody(),
           active,
           source: "audio",
           timestamp: Date.now(),
@@ -551,10 +708,11 @@
           audioContext = new (window.AudioContext || window.webkitAudioContext)();
           const source = audioContext.createMediaStreamSource(mediaStream);
           analyserNode = audioContext.createAnalyser();
-          analyserNode.fftSize = 512;
+          analyserNode.fftSize = 2048;
           analyserNode.smoothingTimeConstant = 0.78;
           source.connect(analyserNode);
           meterBuffer = [];
+          pitchBuffer = [];
           lastMeterAt = 0;
           lastRhythmPublishAt = 0;
           sampleAudioMeter();
@@ -581,6 +739,7 @@
 
         analyserNode = null;
         meterBuffer = [];
+        pitchBuffer = [];
         lastRhythmPublishAt = 0;
         publishLiveRhythm(false);
       }
@@ -591,18 +750,21 @@
         }
 
         if (!lastMeterAt || now - lastMeterAt >= 90) {
-          const data = new Uint8Array(analyserNode.fftSize);
-          analyserNode.getByteTimeDomainData(data);
+          const data = new Float32Array(analyserNode.fftSize);
+          analyserNode.getFloatTimeDomainData(data);
           let sumSquares = 0;
           for (const value of data) {
-            const normalized = (value - 128) / 128;
-            sumSquares += normalized * normalized;
+            sumSquares += value * value;
           }
           const rms = Math.sqrt(sumSquares / data.length);
           const boosted = clamp(rms * 3.8, 0, 1);
           meterBuffer.push(boosted);
+          pitchBuffer.push(estimatePitchHz(data, audioContext ? audioContext.sampleRate : 0));
           if (meterBuffer.length > 36) {
             meterBuffer.shift();
+          }
+          if (pitchBuffer.length > 36) {
+            pitchBuffer.shift();
           }
           lastMeterAt = now;
         }
@@ -618,6 +780,7 @@
       function consumeRhythmSnapshot() {
         const samples = meterBuffer.length ? meterBuffer.slice(-20) : [];
         const volume = samples.length ? samples.reduce((sum, value) => sum + value, 0) / samples.length : 0;
+        const prosody = summarizeProsody();
 
         if (samples.length > 4) {
           meterBuffer = samples.slice(-4);
@@ -625,9 +788,16 @@
           meterBuffer = [];
         }
 
+        if (pitchBuffer.length > 4) {
+          pitchBuffer = pitchBuffer.slice(-4);
+        } else {
+          pitchBuffer = [];
+        }
+
         return {
           samples,
           volume,
+          prosody,
           source: samples.length ? "audio" : "derived",
         };
       }
@@ -699,6 +869,45 @@
         while (feed.children.length > 30) {
           feed.removeChild(feed.lastElementChild);
         }
+      }
+
+      function logEmotionDebug(payload) {
+        console.log({
+          textResult: payload.textResult || null,
+          audioResult: payload.audioResult || null,
+          fusedResult: payload.fusedResult || null,
+          fusionReason: payload.fusionReason || null,
+        });
+      }
+
+      function formatDebugScore(value) {
+        return Number.isFinite(Number(value)) ? Number(value).toFixed(3) : "-";
+      }
+
+      function setDebugBox(valueNode, subvalueNode, result, emptyLabel) {
+        if (!result) {
+          valueNode.textContent = emptyLabel;
+          subvalueNode.textContent = "No signal";
+          return;
+        }
+
+        valueNode.textContent = result.emotion || result.label || emptyLabel;
+        const score = Number.isFinite(Number(result.score)) ? ` · score ${formatDebugScore(result.score)}` : "";
+        subvalueNode.textContent = `${result.source || "unknown"}${score}`;
+      }
+
+      function renderEmotionDebug(payload) {
+        const textResult = payload.textResult || null;
+        const audioResult = payload.audioResult || null;
+        const fusedResult = payload.fusedResult || null;
+
+        setDebugBox(debugTextEmotion, debugTextSource, textResult, "Waiting");
+        setDebugBox(debugAudioEmotion, debugAudioSource, audioResult, "Waiting");
+        setDebugBox(debugFusedEmotion, debugFusedSource, fusedResult, "Waiting");
+        debugTranscript.textContent =
+          payload.text
+            ? `Transcript: ${payload.text}`
+            : "Transcript will appear here.";
       }
 
       function injectCaption(text, source = "speech", rhythm = consumeRhythmSnapshot()) {
@@ -892,6 +1101,13 @@
       window.captionBridge.onCaption((entry) => {
         prependFeedItem(entry);
       });
+
+      if (typeof window.captionBridge.onEmotionDebug === "function") {
+        window.captionBridge.onEmotionDebug((payload) => {
+          logEmotionDebug(payload);
+          renderEmotionDebug(payload);
+        });
+      }
 
       window.captionBridge.onClearCaptions(() => {
         feed.innerHTML = '<div class="empty">Conversation cleared. Waiting for the next caption...</div>';

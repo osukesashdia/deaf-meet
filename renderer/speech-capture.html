@@ -130,8 +130,11 @@
       let mediaStream = null;
       let meterFrame = 0;
       let meterBuffer = [];
+      let pitchBuffer = [];
       let lastMeterAt = 0;
       let lastRhythmPublishAt = 0;
+      let nextServerRetryAt = 0;
+      let serverUnavailable = false;
 
       document.getElementById("endpoint").innerHTML = `Posting captions to <code>${endpoint}</code>`;
 
@@ -139,8 +142,96 @@
         statusNode.textContent = text;
       }
 
+      function markServerUnavailable() {
+        serverUnavailable = true;
+        nextServerRetryAt = Date.now() + 3000;
+        setStatus("Overlay app is unavailable. Restart the app or reopen Browser Capture from the control window.");
+      }
+
+      function markServerAvailable() {
+        if (!serverUnavailable) {
+          return;
+        }
+
+        serverUnavailable = false;
+        nextServerRetryAt = 0;
+        if (shouldKeepListening) {
+          setStatus("Listening. Connection to overlay restored.");
+        }
+      }
+
       function clamp(value, min, max) {
         return Math.min(max, Math.max(min, value));
+      }
+
+      function estimatePitchHz(signal, sampleRate) {
+        if (!signal || signal.length < 2 || !sampleRate) {
+          return 0;
+        }
+
+        let rms = 0;
+        for (const value of signal) {
+          rms += value * value;
+        }
+        rms = Math.sqrt(rms / signal.length);
+
+        if (rms < 0.01) {
+          return 0;
+        }
+
+        const minLag = Math.max(2, Math.floor(sampleRate / 400));
+        const maxLag = Math.min(signal.length - 1, Math.floor(sampleRate / 80));
+        let bestLag = 0;
+        let bestScore = 0;
+
+        for (let lag = minLag; lag <= maxLag; lag += 1) {
+          let correlation = 0;
+          let energyA = 0;
+          let energyB = 0;
+
+          for (let index = 0; index < signal.length - lag; index += 1) {
+            const current = signal[index];
+            const shifted = signal[index + lag];
+            correlation += current * shifted;
+            energyA += current * current;
+            energyB += shifted * shifted;
+          }
+
+          const normalized = correlation / Math.sqrt((energyA || 1) * (energyB || 1));
+          if (normalized > bestScore) {
+            bestScore = normalized;
+            bestLag = lag;
+          }
+        }
+
+        if (!bestLag || bestScore < 0.35) {
+          return 0;
+        }
+
+        return sampleRate / bestLag;
+      }
+
+      function summarizeProsody() {
+        const voiced = pitchBuffer.filter((value) => value > 0);
+        if (!voiced.length) {
+          return {
+            pitchHz: 0,
+            pitchMean: 0,
+            pitchRange: 0,
+            voicedRatio: 0,
+          };
+        }
+
+        const pitchMean = voiced.reduce((sum, value) => sum + value, 0) / voiced.length;
+        const pitchMin = Math.min(...voiced);
+        const pitchMax = Math.max(...voiced);
+
+        return {
+          pitchHz: voiced[voiced.length - 1],
+          pitchMean,
+          pitchRange: clamp((pitchMax - pitchMin) / 220, 0, 1),
+          voicedRatio: voiced.length / Math.max(1, pitchBuffer.length),
+        };
       }
 
       async function startAudioMeter() {
@@ -163,10 +254,11 @@
           audioContext = new (window.AudioContext || window.webkitAudioContext)();
           const source = audioContext.createMediaStreamSource(mediaStream);
           analyserNode = audioContext.createAnalyser();
-          analyserNode.fftSize = 512;
+          analyserNode.fftSize = 2048;
           analyserNode.smoothingTimeConstant = 0.78;
           source.connect(analyserNode);
           meterBuffer = [];
+          pitchBuffer = [];
           lastMeterAt = 0;
           lastRhythmPublishAt = 0;
           sampleAudioMeter();
@@ -193,6 +285,7 @@
 
         analyserNode = null;
         meterBuffer = [];
+        pitchBuffer = [];
         lastRhythmPublishAt = 0;
         publishLiveRhythm(false);
       }
@@ -203,17 +296,20 @@
         }
 
         if (!lastMeterAt || now - lastMeterAt >= 90) {
-          const data = new Uint8Array(analyserNode.fftSize);
-          analyserNode.getByteTimeDomainData(data);
+          const data = new Float32Array(analyserNode.fftSize);
+          analyserNode.getFloatTimeDomainData(data);
           let sumSquares = 0;
           for (const value of data) {
-            const normalized = (value - 128) / 128;
-            sumSquares += normalized * normalized;
+            sumSquares += value * value;
           }
           const rms = Math.sqrt(sumSquares / data.length);
           meterBuffer.push(clamp(rms * 3.8, 0, 1));
+          pitchBuffer.push(estimatePitchHz(data, audioContext ? audioContext.sampleRate : 0));
           if (meterBuffer.length > 36) {
             meterBuffer.shift();
+          }
+          if (pitchBuffer.length > 36) {
+            pitchBuffer.shift();
           }
           lastMeterAt = now;
         }
@@ -229,6 +325,7 @@
       function consumeRhythmSnapshot() {
         const samples = meterBuffer.length ? meterBuffer.slice(-20) : [];
         const volume = samples.length ? samples.reduce((sum, value) => sum + value, 0) / samples.length : 0;
+        const prosody = summarizeProsody();
 
         if (samples.length > 4) {
           meterBuffer = samples.slice(-4);
@@ -236,19 +333,30 @@
           meterBuffer = [];
         }
 
+        if (pitchBuffer.length > 4) {
+          pitchBuffer = pitchBuffer.slice(-4);
+        } else {
+          pitchBuffer = [];
+        }
+
         return {
           samples,
           volume,
+          prosody,
           source: samples.length ? "audio" : "derived",
         };
       }
 
       async function publishLiveRhythm(active = true) {
+        if (Date.now() < nextServerRetryAt) {
+          return;
+        }
+
         const samples = meterBuffer.length ? meterBuffer.slice(-20) : [0];
         const volume = samples.reduce((sum, value) => sum + value, 0) / Math.max(1, samples.length);
 
         try {
-          await fetch(rhythmEndpoint, {
+          const response = await fetch(rhythmEndpoint, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -257,16 +365,27 @@
               samples,
               volume,
               interruption: 0,
+              prosody: summarizeProsody(),
               active,
               source: "audio",
             }),
           });
+
+          if (!response.ok) {
+            throw new Error(`Rhythm post failed with ${response.status}`);
+          }
+
+          markServerAvailable();
         } catch (_error) {
-          // Keep speech capture resilient even if the overlay app is restarting.
+          markServerUnavailable();
         }
       }
 
       async function postCaption(text, rhythm = consumeRhythmSnapshot()) {
+        if (Date.now() < nextServerRetryAt) {
+          throw new Error("Overlay app is unavailable.");
+        }
+
         const response = await fetch(endpoint, {
           method: "POST",
           headers: {
@@ -278,6 +397,8 @@
         if (!response.ok) {
           throw new Error(`Caption post failed with ${response.status}`);
         }
+
+        markServerAvailable();
       }
 
       async function startRecognition() {
