@@ -33,6 +33,7 @@ temp/
 # Electron / local tooling
 .electron/
 *.tsbuildinfo
+.venv/
 
 # OS and editor files
 .DS_Store

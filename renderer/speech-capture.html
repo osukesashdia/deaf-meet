@@ -60,6 +60,33 @@
         background: rgba(255, 255, 255, 0.72);
       }
 
+      .diagnostics {
+        display: grid;
+        gap: 10px;
+      }
+
+      .meter {
+        width: 100%;
+        height: 12px;
+        border-radius: 999px;
+        background: rgba(32, 22, 15, 0.08);
+        overflow: hidden;
+      }
+
+      .meter-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: inherit;
+        background: linear-gradient(90deg, #d2a04f 0%, #b85c38 100%);
+        transition: width 80ms linear;
+      }
+
+      .diag-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
       .actions {
         display: flex;
         gap: 12px;
@@ -81,6 +108,10 @@
         color: var(--text);
       }
 
+      button.active {
+        background: #b85c38;
+      }
+
       button:disabled {
         opacity: 0.55;
         cursor: not-allowed;
@@ -98,6 +129,18 @@
 
       <div id="support" class="status">Checking speech-recognition support...</div>
       <div id="status" class="status">Microphone idle.</div>
+      <div id="debug" class="status">Debug: page loaded.</div>
+      <div class="box diagnostics">
+        <div id="speech-phase">Speech phase: idle</div>
+        <div id="audio-level-label">Mic level: 0%</div>
+        <div class="meter" aria-hidden="true">
+          <div id="audio-level-fill" class="meter-fill"></div>
+        </div>
+        <div class="diag-grid">
+          <div id="audio-meter-state">Audio meter: idle</div>
+          <div id="result-state">Recognition result: waiting</div>
+        </div>
+      </div>
       <div id="interim" class="box">No live transcript yet.</div>
       <div id="endpoint" class="box">Posting captions to <code>http://127.0.0.1:4153/caption</code></div>
 
@@ -117,6 +160,12 @@
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       const statusNode = document.getElementById("status");
       const supportNode = document.getElementById("support");
+      const debugNode = document.getElementById("debug");
+      const speechPhaseNode = document.getElementById("speech-phase");
+      const audioLevelLabelNode = document.getElementById("audio-level-label");
+      const audioLevelFillNode = document.getElementById("audio-level-fill");
+      const audioMeterStateNode = document.getElementById("audio-meter-state");
+      const resultStateNode = document.getElementById("result-state");
       const interimNode = document.getElementById("interim");
       const startButton = document.getElementById("start");
       const stopButton = document.getElementById("stop");
@@ -131,15 +180,59 @@
       let meterFrame = 0;
       let meterBuffer = [];
       let pitchBuffer = [];
+      let waveformBuffer = [];
+      let audioSampleRate = 16000;
       let lastMeterAt = 0;
       let lastRhythmPublishAt = 0;
       let nextServerRetryAt = 0;
       let serverUnavailable = false;
+      let lastVisibleLevel = 0;
 
       document.getElementById("endpoint").innerHTML = `Posting captions to <code>${endpoint}</code>`;
 
+      function logCapture(event, details = {}) {
+        const payload = {
+          event,
+          shouldKeepListening,
+          hasRecognition: Boolean(recognition),
+          ...details,
+        };
+
+        try {
+          console.log("[browser-capture]", payload);
+        } catch (_error) {
+          console.log("[browser-capture]", event, details);
+        }
+
+        debugNode.textContent = `Debug: ${event}`;
+      }
+
       function setStatus(text) {
         statusNode.textContent = text;
+      }
+
+      function setSpeechPhase(text) {
+        speechPhaseNode.textContent = `Speech phase: ${text}`;
+      }
+
+      function setAudioMeterState(text) {
+        audioMeterStateNode.textContent = `Audio meter: ${text}`;
+      }
+
+      function setResultState(text) {
+        resultStateNode.textContent = `Recognition result: ${text}`;
+      }
+
+      function setAudioLevel(level) {
+        const normalized = clamp(Number(level) || 0, 0, 1);
+        lastVisibleLevel = normalized;
+        audioLevelFillNode.style.width = `${Math.round(normalized * 100)}%`;
+        audioLevelLabelNode.textContent = `Mic level: ${Math.round(normalized * 100)}%`;
+      }
+
+      function syncButtons() {
+        startButton.classList.toggle("active", shouldKeepListening);
+        stopButton.classList.toggle("active", !stopButton.disabled);
       }
 
       function markServerUnavailable() {
@@ -234,16 +327,36 @@
         };
       }
 
+      function pushWaveformFrame(signal) {
+        if (!Array.isArray(signal) && !(signal instanceof Float32Array)) {
+          return;
+        }
+
+        for (let index = 0; index < signal.length; index += 8) {
+          waveformBuffer.push(clamp(Number(signal[index]) || 0, -1, 1));
+        }
+
+        if (waveformBuffer.length > 8192) {
+          waveformBuffer.splice(0, waveformBuffer.length - 8192);
+        }
+      }
+
       async function startAudioMeter() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          logCapture("audio-meter-unsupported");
+          setAudioMeterState("unsupported");
           return;
         }
 
         if (mediaStream) {
+          logCapture("audio-meter-reuse");
+          setAudioMeterState("reused");
           return;
         }
 
         try {
+          logCapture("audio-meter-request");
+          setAudioMeterState("requesting microphone");
           mediaStream = await navigator.mediaDevices.getUserMedia({
             audio: {
               echoCancellation: true,
@@ -256,14 +369,25 @@
           analyserNode = audioContext.createAnalyser();
           analyserNode.fftSize = 2048;
           analyserNode.smoothingTimeConstant = 0.78;
+          audioSampleRate = audioContext.sampleRate || 16000;
           source.connect(analyserNode);
           meterBuffer = [];
           pitchBuffer = [];
+          waveformBuffer = [];
           lastMeterAt = 0;
           lastRhythmPublishAt = 0;
+          setAudioMeterState("running");
+          logCapture("audio-meter-started", {
+            sampleRate: audioSampleRate,
+          });
           sampleAudioMeter();
-        } catch (_error) {
+        } catch (error) {
           mediaStream = null;
+          setAudioMeterState("failed");
+          logCapture("audio-meter-failed", {
+            message: error && error.message ? error.message : String(error),
+            name: error && error.name ? error.name : "",
+          });
         }
       }
 
@@ -286,7 +410,10 @@
         analyserNode = null;
         meterBuffer = [];
         pitchBuffer = [];
+        waveformBuffer = [];
         lastRhythmPublishAt = 0;
+        setAudioLevel(0);
+        setAudioMeterState("idle");
         publishLiveRhythm(false);
       }
 
@@ -303,8 +430,11 @@
             sumSquares += value * value;
           }
           const rms = Math.sqrt(sumSquares / data.length);
-          meterBuffer.push(clamp(rms * 3.8, 0, 1));
+          const boosted = clamp(rms * 3.8, 0, 1);
+          meterBuffer.push(boosted);
+          setAudioLevel(boosted);
           pitchBuffer.push(estimatePitchHz(data, audioContext ? audioContext.sampleRate : 0));
+          pushWaveformFrame(data);
           if (meterBuffer.length > 36) {
             meterBuffer.shift();
           }
@@ -326,6 +456,7 @@
         const samples = meterBuffer.length ? meterBuffer.slice(-20) : [];
         const volume = samples.length ? samples.reduce((sum, value) => sum + value, 0) / samples.length : 0;
         const prosody = summarizeProsody();
+        const waveform = waveformBuffer.length ? waveformBuffer.slice(-4096) : [];
 
         if (samples.length > 4) {
           meterBuffer = samples.slice(-4);
@@ -339,9 +470,17 @@
           pitchBuffer = [];
         }
 
+        if (waveformBuffer.length > 512) {
+          waveformBuffer = waveformBuffer.slice(-512);
+        } else {
+          waveformBuffer = [];
+        }
+
         return {
           samples,
           volume,
+          waveform,
+          sampleRate: audioSampleRate,
           prosody,
           source: samples.length ? "audio" : "derived",
         };
@@ -404,13 +543,16 @@
       async function startRecognition() {
         if (!SpeechRecognition) {
           setStatus("Speech recognition is not available in this browser.");
+          logCapture("unsupported");
           return;
         }
 
         if (recognition) {
+          logCapture("stop-existing-recognition");
           recognition.stop();
         }
 
+        logCapture("recognition-created");
         recognition = new SpeechRecognition();
         recognition.lang = "en-US";
         recognition.continuous = true;
@@ -421,10 +563,48 @@
           setStatus("Listening. Speak naturally.");
           startButton.disabled = true;
           stopButton.disabled = false;
+          syncButtons();
+          setSpeechPhase("recognition started");
+          logCapture("onstart");
+        };
+
+        recognition.onaudiostart = () => {
+          setSpeechPhase("audio detected");
+          logCapture("onaudiostart");
+        };
+
+        recognition.onaudioend = () => {
+          setSpeechPhase("audio ended");
+          logCapture("onaudioend");
+        };
+
+        recognition.onsoundstart = () => {
+          setSpeechPhase("sound detected");
+          logCapture("onsoundstart", {
+            micLevel: Math.round(lastVisibleLevel * 100),
+          });
+        };
+
+        recognition.onsoundend = () => {
+          setSpeechPhase("sound ended");
+          logCapture("onsoundend");
+        };
+
+        recognition.onspeechstart = () => {
+          setSpeechPhase("speech detected");
+          logCapture("onspeechstart", {
+            micLevel: Math.round(lastVisibleLevel * 100),
+          });
+        };
+
+        recognition.onspeechend = () => {
+          setSpeechPhase("speech ended");
+          logCapture("onspeechend");
         };
 
         recognition.onresult = async (event) => {
           let interimText = "";
+          let finalCount = 0;
 
           for (let index = event.resultIndex; index < event.results.length; index += 1) {
             const result = event.results[index];
@@ -435,25 +615,50 @@
             }
 
             if (result.isFinal) {
+              finalCount += 1;
               interimNode.textContent = `Final: ${transcript}`;
+              setResultState(`final transcript "${transcript}"`);
               try {
                 await postCaption(transcript);
                 setStatus("Listening. Final transcript sent to overlay.");
+                logCapture("final-posted", { transcript });
               } catch (error) {
                 setStatus(error.message || "Failed to send transcript to overlay.");
+                logCapture("final-post-failed", {
+                  transcript,
+                  message: error && error.message ? error.message : String(error),
+                });
               }
             } else {
               interimText += `${transcript} `;
+              setResultState(`interim transcript "${transcript}"`);
             }
           }
 
           if (interimText.trim()) {
             interimNode.textContent = `Listening: ${interimText.trim()}`;
           }
+
+          logCapture("onresult", {
+            finals: finalCount,
+            interim: interimText.trim(),
+          });
+        };
+
+        recognition.onnomatch = () => {
+          setResultState("heard audio but no transcript match");
+          logCapture("onnomatch", {
+            micLevel: Math.round(lastVisibleLevel * 100),
+          });
         };
 
         recognition.onerror = (event) => {
           const error = event.error || "unknown";
+          setResultState(`error ${error}`);
+          logCapture("onerror", {
+            error,
+            message: event.message || "",
+          });
           if (error === "network") {
             setStatus("Browser speech-recognition network error. Try Chrome and make sure online speech recognition is allowed.");
           } else if (error === "not-allowed" || error === "service-not-allowed") {
@@ -467,10 +672,14 @@
         recognition.onend = () => {
           startButton.disabled = false;
           stopButton.disabled = true;
+          syncButtons();
+          setSpeechPhase("idle");
+          logCapture("onend");
           stopAudioMeter();
 
           if (shouldKeepListening) {
             setStatus("Restarting speech recognition...");
+            logCapture("restart-request");
             recognition.start();
             startAudioMeter();
             return;
@@ -479,21 +688,43 @@
           setStatus("Microphone idle.");
         };
 
-        await startAudioMeter();
+        logCapture("start-request");
         recognition.start();
+        logCapture("start-called");
+        startAudioMeter();
       }
 
       startButton.addEventListener("click", () => {
         shouldKeepListening = true;
+        syncButtons();
+        logCapture("start-button-click");
         startRecognition();
+      });
+
+      startButton.addEventListener("pointerdown", () => {
+        logCapture("start-button-pointerdown");
       });
 
       stopButton.addEventListener("click", () => {
         shouldKeepListening = false;
+        syncButtons();
+        logCapture("stop-button-click");
         if (recognition) {
           recognition.stop();
         }
         stopAudioMeter();
+      });
+
+      window.addEventListener("error", (event) => {
+        logCapture("window-error", {
+          message: event.message || "",
+        });
+      });
+
+      window.addEventListener("unhandledrejection", (event) => {
+        logCapture("unhandledrejection", {
+          message: event.reason && event.reason.message ? event.reason.message : String(event.reason),
+        });
       });
 
       if (SpeechRecognition) {
@@ -502,6 +733,15 @@
         supportNode.textContent = "This browser does not expose SpeechRecognition. Open this page in Chrome.";
         startButton.disabled = true;
       }
+
+      syncButtons();
+      setSpeechPhase("idle");
+      setAudioMeterState("idle");
+      setResultState("waiting");
+      setAudioLevel(0);
+      logCapture("page-ready", {
+        speechRecognition: Boolean(SpeechRecognition),
+      });
     </script>
   </body>
 </html>

@@ -341,6 +341,7 @@
           <strong>Microphone idle</strong>
           Click Start Listening and allow microphone access.
         </div>
+        <div id="control-debug" class="url-box">Debug: page loaded.</div>
         <div id="interim-preview" class="url-box">No live transcript yet.</div>
         <div class="row wrap">
           <button id="start-listening">Start Listening</button>
@@ -455,6 +456,7 @@
 
       const serverBadge = document.getElementById("server-badge");
       const speechStatus = document.getElementById("speech-status");
+      const controlDebug = document.getElementById("control-debug");
       const speechSupport = document.getElementById("speech-support");
       const interimPreview = document.getElementById("interim-preview");
       const themeSelect = document.getElementById("theme-select");
@@ -487,6 +489,9 @@
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       let recognition = null;
       let shouldKeepListening = false;
+      let recognitionRestartTimer = 0;
+      let lastRecognitionError = "";
+      let recognitionActive = false;
       let port = 4153;
       let audioContext = null;
       let analyserNode = null;
@@ -494,8 +499,39 @@
       let meterFrame = 0;
       let meterBuffer = [];
       let pitchBuffer = [];
+      let waveformBuffer = [];
+      let audioSampleRate = 16000;
       let lastMeterAt = 0;
       let lastRhythmPublishAt = 0;
+
+      function logControl(event, details = {}) {
+        const payload = { event, ...details };
+        try {
+          console.log("[control-ui]", payload);
+        } catch (_error) {
+          console.log("[control-ui]", event, details);
+        }
+        controlDebug.textContent = `Debug: ${event}`;
+      }
+
+      function logRecognition(event, details = {}) {
+        try {
+          console.log("[control:speech]", {
+            event,
+            shouldKeepListening,
+            recognitionActive,
+            lastRecognitionError,
+            ...details,
+          });
+        } catch (_error) {
+          console.log("[control:speech]", event, details);
+        }
+      }
+
+      function syncListeningButtons() {
+        startListeningButton.classList.toggle("active", shouldKeepListening || recognitionActive);
+        stopListeningButton.classList.toggle("active", recognitionActive);
+      }
 
       function buildLocalCaptionUrl() {
         return `http://127.0.0.1:${port}/caption`;
@@ -670,6 +706,20 @@
         };
       }
 
+      function pushWaveformFrame(signal) {
+        if (!Array.isArray(signal) && !(signal instanceof Float32Array)) {
+          return;
+        }
+
+        for (let index = 0; index < signal.length; index += 8) {
+          waveformBuffer.push(clamp(Number(signal[index]) || 0, -1, 1));
+        }
+
+        if (waveformBuffer.length > 8192) {
+          waveformBuffer.splice(0, waveformBuffer.length - 8192);
+        }
+      }
+
       function publishLiveRhythm(active = true) {
         if (!window.captionBridge || typeof window.captionBridge.updateLiveRhythm !== "function") {
           return;
@@ -710,9 +760,11 @@
           analyserNode = audioContext.createAnalyser();
           analyserNode.fftSize = 2048;
           analyserNode.smoothingTimeConstant = 0.78;
+          audioSampleRate = audioContext.sampleRate || 16000;
           source.connect(analyserNode);
           meterBuffer = [];
           pitchBuffer = [];
+          waveformBuffer = [];
           lastMeterAt = 0;
           lastRhythmPublishAt = 0;
           sampleAudioMeter();
@@ -740,6 +792,7 @@
         analyserNode = null;
         meterBuffer = [];
         pitchBuffer = [];
+        waveformBuffer = [];
         lastRhythmPublishAt = 0;
         publishLiveRhythm(false);
       }
@@ -760,6 +813,7 @@
           const boosted = clamp(rms * 3.8, 0, 1);
           meterBuffer.push(boosted);
           pitchBuffer.push(estimatePitchHz(data, audioContext ? audioContext.sampleRate : 0));
+          pushWaveformFrame(data);
           if (meterBuffer.length > 36) {
             meterBuffer.shift();
           }
@@ -781,6 +835,7 @@
         const samples = meterBuffer.length ? meterBuffer.slice(-20) : [];
         const volume = samples.length ? samples.reduce((sum, value) => sum + value, 0) / samples.length : 0;
         const prosody = summarizeProsody();
+        const waveform = waveformBuffer.length ? waveformBuffer.slice(-4096) : [];
 
         if (samples.length > 4) {
           meterBuffer = samples.slice(-4);
@@ -794,9 +849,17 @@
           pitchBuffer = [];
         }
 
+        if (waveformBuffer.length > 512) {
+          waveformBuffer = waveformBuffer.slice(-512);
+        } else {
+          waveformBuffer = [];
+        }
+
         return {
           samples,
           volume,
+          waveform,
+          sampleRate: audioSampleRate,
           prosody,
           source: samples.length ? "audio" : "derived",
         };
@@ -843,6 +906,39 @@
 
       function setSpeechStatus(title, detail) {
         speechStatus.innerHTML = `<strong>${title}</strong>${detail}`;
+      }
+
+      function clearRecognitionRestart() {
+        if (recognitionRestartTimer) {
+          window.clearTimeout(recognitionRestartTimer);
+          recognitionRestartTimer = 0;
+        }
+      }
+
+      function scheduleRecognitionRestart() {
+        clearRecognitionRestart();
+        startListeningButton.disabled = true;
+        stopListeningButton.disabled = false;
+        syncListeningButtons();
+        setSpeechStatus("Reconnecting", "Speech recognition paused briefly. Restarting...");
+        logRecognition("restart-scheduled");
+        recognitionRestartTimer = window.setTimeout(() => {
+          recognitionRestartTimer = 0;
+          if (!shouldKeepListening || !recognition) {
+            logRecognition("restart-skipped");
+            return;
+          }
+
+          try {
+            logRecognition("restart-start");
+            recognition.start();
+          } catch (error) {
+            logRecognition("restart-failed", {
+              message: error && error.message ? error.message : String(error),
+            });
+            scheduleRecognitionRestart();
+          }
+        }, 600);
       }
 
       function prependFeedItem(entry) {
@@ -913,9 +1009,14 @@
       function injectCaption(text, source = "speech", rhythm = consumeRhythmSnapshot()) {
         const normalized = String(text || "").trim();
         if (!normalized) {
+          logControl("inject-skipped-empty", { source });
           return;
         }
 
+        logControl("inject-caption", {
+          source,
+          text: normalized,
+        });
         window.captionBridge.injectCaption({
           text: normalized,
           lang: "en",
@@ -927,80 +1028,132 @@
       async function startRecognition() {
         if (!SpeechRecognition) {
           setSpeechStatus("Speech recognition unavailable", "This Chromium runtime does not expose the SpeechRecognition API.");
+          logRecognition("unsupported");
           return;
         }
 
-        if (recognition) {
-          recognition.stop();
+        if (recognitionActive) {
+          logRecognition("start-ignored-active");
+          return;
         }
 
-        recognition = new SpeechRecognition();
-        recognition.lang = "en-US";
-        recognition.continuous = true;
-        recognition.interimResults = true;
-        recognition.maxAlternatives = 1;
+        if (!recognition) {
+          logRecognition("recognition-created");
+          recognition = new SpeechRecognition();
+          recognition.lang = "en-US";
+          recognition.continuous = true;
+          recognition.interimResults = true;
+          recognition.maxAlternatives = 1;
 
-        recognition.onstart = () => {
-          setSpeechStatus("Listening", "Speak naturally. Final phrases will be sent to the overlay.");
-          startListeningButton.disabled = true;
-          stopListeningButton.disabled = false;
-        };
+          recognition.onstart = () => {
+            recognitionActive = true;
+            lastRecognitionError = "";
+            setSpeechStatus("Listening", "Speak naturally. Final phrases will be sent to the overlay.");
+            startListeningButton.disabled = true;
+            stopListeningButton.disabled = false;
+            syncListeningButtons();
+            logRecognition("onstart");
+          };
 
-        recognition.onresult = (event) => {
-          let interimText = "";
+          recognition.onresult = (event) => {
+            let interimText = "";
+            let finalCount = 0;
 
-          for (let index = event.resultIndex; index < event.results.length; index += 1) {
-            const result = event.results[index];
-            const transcript = result[0] ? result[0].transcript.trim() : "";
+            for (let index = event.resultIndex; index < event.results.length; index += 1) {
+              const result = event.results[index];
+              const transcript = result[0] ? result[0].transcript.trim() : "";
 
-            if (!transcript) {
-              continue;
+              if (!transcript) {
+                continue;
+              }
+
+              if (result.isFinal) {
+                finalCount += 1;
+                injectCaption(transcript, "speech");
+                interimPreview.textContent = `Final: ${transcript}`;
+              } else {
+                interimText += `${transcript} `;
+              }
             }
 
-            if (result.isFinal) {
-              injectCaption(transcript, "speech");
-              interimPreview.textContent = `Final: ${transcript}`;
+            if (interimText.trim()) {
+              interimPreview.textContent = `Listening: ${interimText.trim()}`;
+            }
+
+            logRecognition("onresult", {
+              finals: finalCount,
+              interim: interimText.trim(),
+            });
+          };
+
+          recognition.onerror = (event) => {
+            const error = event.error || "Unknown recognition error.";
+            lastRecognitionError = error;
+            logRecognition("onerror", {
+              error,
+              message: event.message || "",
+            });
+
+            if (error === "network") {
+              setSpeechStatus("Speech recognition error", "Electron speech recognition hit a network error. Use Browser Capture for a more reliable microphone path.");
+            } else if (error === "audio-capture") {
+              setSpeechStatus("Microphone unavailable", "The system microphone could not be captured in this window. Browser Capture is the safer fallback.");
             } else {
-              interimText += `${transcript} `;
+              setSpeechStatus("Speech recognition error", error);
             }
-          }
 
-          if (interimText.trim()) {
-            interimPreview.textContent = `Listening: ${interimText.trim()}`;
-          }
-        };
+            if (
+              error === "not-allowed" ||
+              error === "service-not-allowed" ||
+              error === "audio-capture" ||
+              error === "network"
+            ) {
+              shouldKeepListening = false;
+              clearRecognitionRestart();
+              recognitionActive = false;
+              startListeningButton.disabled = false;
+              stopListeningButton.disabled = true;
+              syncListeningButtons();
+            }
+          };
 
-        recognition.onerror = (event) => {
-          const error = event.error || "Unknown recognition error.";
-          if (error === "network") {
-            setSpeechStatus("Speech recognition error", "Electron speech recognition hit a network error. Use Browser Capture for a more reliable microphone path.");
-          } else {
-            setSpeechStatus("Speech recognition error", error);
-          }
-          if (event.error === "not-allowed" || event.error === "service-not-allowed") {
-            shouldKeepListening = false;
+          recognition.onend = () => {
+            recognitionActive = false;
+            syncListeningButtons();
+            logRecognition("onend");
+
+            if (
+              shouldKeepListening &&
+              lastRecognitionError !== "not-allowed" &&
+              lastRecognitionError !== "service-not-allowed" &&
+              lastRecognitionError !== "audio-capture" &&
+              lastRecognitionError !== "network"
+            ) {
+              scheduleRecognitionRestart();
+              return;
+            }
+
+            clearRecognitionRestart();
             startListeningButton.disabled = false;
             stopListeningButton.disabled = true;
-          }
-        };
+            syncListeningButtons();
+            setSpeechStatus("Microphone idle", "Click Start Listening and allow microphone access.");
+          };
+        }
 
-        recognition.onend = () => {
-          startListeningButton.disabled = false;
-          stopListeningButton.disabled = true;
-          stopAudioMeter();
+        clearRecognitionRestart();
+        syncListeningButtons();
+        logRecognition("start-request");
 
-          if (shouldKeepListening) {
-            setSpeechStatus("Reconnecting", "Speech recognition paused briefly. Restarting...");
-            recognition.start();
-            startAudioMeter();
-            return;
-          }
-
-          setSpeechStatus("Microphone idle", "Click Start Listening and allow microphone access.");
-        };
-
-        await startAudioMeter();
-        recognition.start();
+        try {
+          recognition.start();
+          logRecognition("start-called");
+        } catch (error) {
+          logRecognition("start-throw", {
+            message: error && error.message ? error.message : String(error),
+          });
+          scheduleRecognitionRestart();
+        }
       }
 
       document.getElementById("copy-local-url").addEventListener("click", async () => {
@@ -1069,11 +1222,16 @@
 
       startListeningButton.addEventListener("click", () => {
         shouldKeepListening = true;
+        syncListeningButtons();
+        logRecognition("start-button-click");
         startRecognition();
       });
 
       stopListeningButton.addEventListener("click", () => {
         shouldKeepListening = false;
+        clearRecognitionRestart();
+        syncListeningButtons();
+        logRecognition("stop-button-click");
         if (recognition) {
           recognition.stop();
         }
@@ -1089,13 +1247,25 @@
       });
 
       document.getElementById("send-manual-caption").addEventListener("click", () => {
+        logControl("manual-button-click", {
+          length: String(manualCaptionInput.value || "").trim().length,
+        });
         injectCaption(manualCaptionInput.value, "manual");
         manualCaptionInput.value = "";
       });
 
+      document.getElementById("send-manual-caption").addEventListener("pointerdown", () => {
+        logControl("manual-button-pointerdown");
+      });
+
       document.getElementById("simulate-caption").addEventListener("click", () => {
+        logControl("simulate-button-click");
         const text = samples[Math.floor(Math.random() * samples.length)];
         injectCaption(text, "simulate");
+      });
+
+      document.getElementById("simulate-caption").addEventListener("pointerdown", () => {
+        logControl("simulate-button-pointerdown");
       });
 
       window.captionBridge.onCaption((entry) => {
@@ -1127,6 +1297,18 @@
         serverBadge.textContent = status.running ? `Server live on ${status.port}` : "Server offline";
       });
 
+      window.addEventListener("error", (event) => {
+        logControl("window-error", {
+          message: event.message || "",
+        });
+      });
+
+      window.addEventListener("unhandledrejection", (event) => {
+        logControl("unhandledrejection", {
+          message: event.reason && event.reason.message ? event.reason.message : String(event.reason),
+        });
+      });
+
       if (SpeechRecognition) {
         speechSupport.textContent = "Speech recognition is available in this runtime, but Electron can still be unreliable. Browser Capture is the safer fallback.";
       } else {
@@ -1135,6 +1317,10 @@
 
       syncSettings();
       refreshLocalUrl();
+      syncListeningButtons();
+      logControl("page-ready", {
+        hasBridge: Boolean(window.captionBridge),
+      });
     </script>
   </body>
 </html>

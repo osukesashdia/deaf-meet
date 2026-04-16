@@ -1,5 +1,6 @@
 const path = require("path");
-const { execFile } = require("child_process");
+const fs = require("fs");
+const { execFile, spawn } = require("child_process");
 const { app, BrowserWindow, ipcMain, screen, shell } = require("electron");
 const {
   startCaptionServer,
@@ -7,10 +8,12 @@ const {
 } = require("./caption-server");
 
 const DEFAULT_PORT = Number(process.env.CAPTION_PORT) || 4153;
+const SER_SERVICE_PORT = Number(process.env.SER_SERVICE_PORT) || 4163;
 const OVERLAY_HEIGHT = 160;
 const CONTROL_SIZE = { width: 420, height: 620 };
 const RHYTHM_SAMPLE_SIZE = 20;
 const INTERRUPTION_WINDOW_MS = 1400;
+const SER_REQUEST_TIMEOUT_MS = 1500;
 const EMOTION_MODEL_URL =
   "https://api-inference.huggingface.co/models/j-hartmann/emotion-english-distilroberta-base";
 const EMOTION_REQUEST_TIMEOUT_MS = 10000;
@@ -18,9 +21,14 @@ const EMOTION_REQUEST_TIMEOUT_MS = 10000;
 let overlayWindow = null;
 let controlWindow = null;
 let overlayPinInterval = null;
+let serServiceProcess = null;
 let captionServerState = {
   running: false,
   port: DEFAULT_PORT,
+};
+let serServiceState = {
+  running: false,
+  port: SER_SERVICE_PORT,
 };
 
 const overlaySettings = {
@@ -78,6 +86,18 @@ function normalizeRhythmSamples(samples = []) {
   return compacted;
 }
 
+function normalizeWaveformSamples(samples = []) {
+  const normalized = Array.isArray(samples)
+    ? samples
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+        .map((value) => clamp(value, -1, 1))
+        .slice(-4096)
+    : [];
+
+  return normalized;
+}
+
 function normalizeProsody(prosody = {}) {
   if (!prosody || typeof prosody !== "object") {
     return {};
@@ -118,6 +138,8 @@ function buildFallbackRhythmSamples(text) {
 function deriveRhythm(payload, text, timestamp) {
   const payloadRhythm = payload && typeof payload.rhythm === "object" ? payload.rhythm : {};
   const samples = normalizeRhythmSamples(payloadRhythm.samples);
+  const waveform = normalizeWaveformSamples(payloadRhythm.waveform);
+  const sampleRate = Number(payloadRhythm.sampleRate);
   const prosody = normalizeProsody(payloadRhythm.prosody);
   const rhythmSamples = samples.length ? samples : buildFallbackRhythmSamples(text);
   const averageVolume =
@@ -135,6 +157,8 @@ function deriveRhythm(payload, text, timestamp) {
 
   return {
     samples: rhythmSamples,
+    ...(waveform.length ? { waveform } : {}),
+    ...(Number.isFinite(sampleRate) ? { sampleRate } : {}),
     volume,
     interruption,
     ...(Object.keys(prosody).length ? { prosody } : {}),
@@ -169,6 +193,107 @@ function broadcastLiveRhythm(payload = {}) {
 
   if (overlayWindow && !overlayWindow.isDestroyed()) {
     overlayWindow.webContents.send("rhythm:live", latestLiveRhythm);
+  }
+}
+
+function stripRuntimeRhythm(rhythm = {}) {
+  const { waveform, sampleRate, ...rest } = rhythm || {};
+  return rest;
+}
+
+function startSerService() {
+  if (serServiceProcess) {
+    return;
+  }
+
+  const serverPath = path.join(__dirname, "ser_backend", "server.py");
+  const venvPython = path.join(__dirname, ".venv", "bin", "python");
+  const pythonBinary = fs.existsSync(venvPython) ? venvPython : "python3";
+
+  serServiceProcess = spawn(pythonBinary, [serverPath, "--port", String(SER_SERVICE_PORT)], {
+    cwd: __dirname,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  serServiceState = {
+    running: true,
+    port: SER_SERVICE_PORT,
+  };
+
+  if (serServiceProcess.stdout) {
+    serServiceProcess.stdout.on("data", (chunk) => {
+      process.stdout.write(`[ser] ${chunk}`);
+    });
+  }
+
+  if (serServiceProcess.stderr) {
+    serServiceProcess.stderr.on("data", (chunk) => {
+      process.stderr.write(`[ser] ${chunk}`);
+    });
+  }
+
+  serServiceProcess.on("exit", () => {
+    serServiceProcess = null;
+    serServiceState = {
+      running: false,
+      port: SER_SERVICE_PORT,
+    };
+  });
+}
+
+function stopSerService() {
+  if (!serServiceProcess) {
+    return;
+  }
+
+  serServiceProcess.kill();
+  serServiceProcess = null;
+  serServiceState = {
+    running: false,
+    port: SER_SERVICE_PORT,
+  };
+}
+
+async function detectAudioEmotionViaSerService(rhythm = {}) {
+  if (!serServiceState.running) {
+    return null;
+  }
+
+  if (!Array.isArray(rhythm.waveform) || !rhythm.waveform.length) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), SER_REQUEST_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(`http://127.0.0.1:${SER_SERVICE_PORT}/infer`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        rhythm: {
+          waveform: rhythm.waveform,
+          sampleRate: rhythm.sampleRate || 16000,
+          volume: rhythm.volume || 0,
+          interruption: rhythm.interruption || 0,
+          prosody: rhythm.prosody || {},
+        },
+      }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`SER service request failed with ${response.status}`);
+    }
+
+    const data = await response.json();
+    return data && data.result ? data.result : null;
+  } catch (_error) {
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -509,14 +634,15 @@ function fuseEmotionDetections(textResult, audioResult) {
 
 async function detectEmotion(text, rhythm = {}) {
   const textResult = await detectTextEmotion(text);
-  const audioResult = detectAudioEmotion(text, rhythm);
+  const serviceAudioResult = await detectAudioEmotionViaSerService(rhythm);
+  const audioResult = serviceAudioResult || detectAudioEmotion(text, rhythm);
   const fused = fuseEmotionDetections(textResult, audioResult);
 
   return {
     result: fused.result,
     debug: {
       text,
-      rhythm,
+      rhythm: stripRuntimeRhythm(rhythm),
       textResult,
       audioResult,
       fusedResult: fused.result,
@@ -534,7 +660,7 @@ async function normalizeCaption(payload = {}) {
   const numericSeq = Number(payload.seq);
   const seq = Number.isFinite(numericSeq) ? numericSeq : nextInjectedSeq++;
   const timestamp = Number.isFinite(Number(payload.timestamp)) ? Number(payload.timestamp) : Date.now();
-  const rhythm = deriveRhythm(payload, text, timestamp);
+  const rawRhythm = deriveRhythm(payload, text, timestamp);
   let debugPayload = null;
   const detected = payload.detectedEmotion
     ? {
@@ -546,7 +672,7 @@ async function normalizeCaption(payload = {}) {
     : ((result) => {
         debugPayload = result.debug;
         return result.result;
-      })(await detectEmotion(text, rhythm));
+      })(await detectEmotion(text, rawRhythm));
 
   if (debugPayload) {
     emitEmotionDebug({
@@ -566,7 +692,7 @@ async function normalizeCaption(payload = {}) {
     detectedEmotion: detected.label,
     emotionScore: detected.score,
     emotionSource: detected.source,
-    rhythm,
+    rhythm: stripRuntimeRhythm(rawRhythm),
     source: payload.source || "http",
     ...(payload.simulated ? { simulated: true } : {}),
   };
@@ -815,10 +941,13 @@ function registerIpc() {
   ipcMain.handle("server:getStatus", () => ({
     running: captionServerState.running,
     port: captionServerState.port,
+    serRunning: serServiceState.running,
+    serPort: serServiceState.port,
   }));
 }
 
 async function bootstrap() {
+  startSerService();
   createOverlayWindow();
   createControlWindow();
   registerIpc();
@@ -851,6 +980,7 @@ app.on("before-quit", () => {
     clearInterval(overlayPinInterval);
   }
   stopCaptionServer();
+  stopSerService();
 });
 
 app.on("window-all-closed", () => {

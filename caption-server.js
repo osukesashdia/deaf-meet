@@ -91,8 +91,15 @@ function normalizeRhythm(value) {
         .map((entry) => Number(entry))
         .filter((entry) => Number.isFinite(entry))
     : [];
+  const waveform = Array.isArray(value.waveform)
+    ? value.waveform
+        .map((entry) => Number(entry))
+        .filter((entry) => Number.isFinite(entry))
+        .slice(-4096)
+    : [];
   const volume = Number(value.volume);
   const interruption = Number(value.interruption);
+  const sampleRate = Number(value.sampleRate);
   const prosody = value.prosody && typeof value.prosody === "object" ? value.prosody : {};
   const pitchHz = Number(prosody.pitchHz);
   const pitchMean = Number(prosody.pitchMean);
@@ -101,8 +108,10 @@ function normalizeRhythm(value) {
 
   return {
     ...(samples.length ? { samples } : {}),
+    ...(waveform.length ? { waveform } : {}),
     ...(Number.isFinite(volume) ? { volume } : {}),
     ...(Number.isFinite(interruption) ? { interruption } : {}),
+    ...(Number.isFinite(sampleRate) ? { sampleRate } : {}),
     ...(
       Number.isFinite(pitchHz) ||
       Number.isFinite(pitchMean) ||
